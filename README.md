@@ -13,7 +13,13 @@ harmonics + secular trend + surge (replacing fit-then-decompose), **proper
 scoring (CRPS)** calibration with per-constituent error attribution, and
 **gridded regional assimilation** of the EOF field. v0.4 adds the **product
 surface**: an HTTP API, a terminal dashboard, feed exports (CSV/JSON/XTide/
-NetCDF3), and marine depth (region rulesets, wave-coupled rip, surge alerts).
+  NetCDF3), and marine depth (region rulesets, wave-coupled rip, surge alerts).
+
+v0.5 is the ambition tier: a **crowd-sourced gauge network** (`GaugeStore`)
+where every cheap-sensor upload improves the shared EOF regional field — a real
+network effect — plus **global coastal coverage** from public harmonic databases
+(`harmonics_db`, benchmarked per region) and a published **validation write-up**
+(`VALIDATION.md`) with bench tables vs `pytides` and `UTide`.
 
 ## Install
 
@@ -53,6 +59,13 @@ tideglass export SF 2024-02-01 --format netcdf --out sf.nc   # CSV/JSON/XTide/Ne
 tideglass tui SF 2024-02-01                                 # terminal dashboard
 tideglass alert data/noaa_9414290_20240101_20240301.csv --station SF --threshold 0.5
 tideglass serve --host 127.0.0.1 --port 8000               # GET /predict, /advise
+```
+
+```bash
+# v0.5 — crowd-sourced gauges + global coverage
+tideglass contribute upload.csv -122.34 47.60 --station pier07   # cheap-sensor upload
+tideglass network                                             # the network effect
+tideglass validate                                            # coverage + per-region bench
 ```
 
 ```python
@@ -107,14 +120,16 @@ tideglass/
 │   ├── kalman.py     # v0.3: joint tide+surge+trend state-space smoother
 │   ├── calibration.py # v0.3: CRPS + coverage + per-constituent attribution
 │   ├── export.py      # v0.4: CSV/JSON/XTide/NetCDF3 feed adapters
-│   └── spatial.py    # multi-station EOF harmonization + gridded field
+│   ├── spatial.py    # multi-station EOF harmonization + gridded field
+│   ├── crowdsource.py # v0.5: crowd-sourced gauge network (network effect)
+│   └── harmonics_db.py # v0.5: global coverage from public harmonic databases
 ├── marine/           # domain layer (consumes predict() only)
 │   ├── knowledge.py / species.py / harvesting.py / rip.py / advisor.py
 │   └── alerting.py   # v0.4: surge-event alerts for watched stations
 ├── web.py            # v0.4: stdlib HTTP API (GET /predict, /advise)
 ├── tui.py            # v0.4: terminal dashboard
 ├── cli.py            # fit / predict / bench / advise / smooth / calibrate /
-│                    #   export / serve / tui / alert
+│                    #   export / serve / tui / alert / contribute / network / validate
 data/                 # sample NOAA gauge CSVs (San Francisco 9414290)
 ```
 

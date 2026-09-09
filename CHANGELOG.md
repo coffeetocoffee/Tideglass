@@ -6,6 +6,32 @@ All notable changes to Tideglass are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.5.0]
+Milestone "Ambition tier" — released.
+
+### Added
+- `marea/crowdsource.py` — `GaugeStore`, a dependency-free local store for
+  crowd-sourced cheap-sensor uploads (`time,height` CSV + lon/lat). Multiple
+  gauges are merged into the EOF network so every upload makes the shared
+  regional field (and each station's denoised reconstruction) strictly better.
+- `GaugeStore.network_effect()` quantifies the network effect: explained
+  regional variance rises as each station joins.
+- `marea/harmonics_db.py` — global coastal coverage from public harmonic
+  databases: a curated public-domain seed table (NOAA CO-OPS + IHO/TPXO-style
+  values) keyed by region, plus `load_station` / `benchmark_region` /
+  `coverage_report` / `add_harmonic_file` to extend coverage from authoritative
+  files.
+- CLI: `tideglass contribute <csv> <lon> <lat> --station NAME`, `tideglass
+  network` (the network effect), `tideglass validate` (global coverage +
+  per-region benchmark).
+- `VALIDATION.md` — published validation write-up with bench tables vs
+  `pytides` (and `UTide` discussion) plus the v0.5 regional coverage and
+  network-effect results.
+
+### Changed
+- Public API now exports `GaugeStore`, `add_harmonic_file`, `benchmark_region`,
+  `coverage_report`, `load_station`.
+
 ## [0.4.0]
 Milestone "Product surface" — released.
 

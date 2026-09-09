@@ -5,6 +5,9 @@
     tideglass bench <csv> [--test-fraction F] [--against pytides|none]
     tideglass advise <station> <date> [--store DIR] [--days N]
     tideglass fetch <station> <begin> <end> [--out CSV] [--datum D] [--interval I]
+    tideglass contribute <csv> <lon> <lat> --station NAME [--store DIR] [--source S]
+    tideglass network [--store DIR] [--threshold F]
+    tideglass validate [--region R]
 
 ``fit`` reads ``time,height`` rows (ISO-8601 datetimes, metres) and saves a
 model artifact; ``predict`` prints an hourly height curve with 95% bands;
@@ -367,6 +370,62 @@ def cmd_tui(args) -> int:
     return 0
 
 
+def cmd_contribute(args) -> int:
+    from tideglass.marea.crowdsource import GaugeStore
+
+    gs = GaugeStore(args.store)
+    try:
+        n = gs.add_csv(args.csv, args.station, args.lon, args.lat,
+                       source=args.source)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass contribute: {exc}", file=sys.stderr)
+        return 2
+    print(f"station: {args.station}  observations: {n}  source: {args.source}")
+    print(f"network size: {gs.count} gauges (store={args.store})")
+    return 0
+
+
+def cmd_network(args) -> int:
+    from tideglass.marea.crowdsource import GaugeStore
+
+    gs = GaugeStore(args.store)
+    if gs.count < 2:
+        print(f"tideglass network: only {gs.count} gauge(s) in {args.store!r}; "
+              f"add at least 2 with `tideglass contribute` to form a network")
+        return 2
+    eff = gs.network_effect(variance_threshold=args.threshold)
+    print(f"network: {eff['n_total']} gauges, variance threshold "
+          f"{eff['variance_threshold']:.2f}")
+    print(f"{'n':>3}{'total_explained':>16}{'modes_to_thr':>14}")
+    for s in eff["steps"]:
+        print(f"{s['n_stations']:>3}{s['total_explained']:>16.4f}"
+              f"{s['modes_to_threshold']:>14}")
+    print(f"network-effect gain in explained variance: "
+          f"{eff['gain_total_explained']:+.4f}")
+    return 0
+
+
+def cmd_validate(args) -> int:
+    from tideglass.marea import harmonics_db as HDB
+
+    rep = HDB.coverage_report()
+    print(f"global coverage: {rep['n_stations']} stations across "
+          f"{rep['n_regions']} regions (published harmonics, no fit needed)")
+    for region, n in rep["regions"].items():
+        print(f"  {region:<20} {n} stations")
+    print()
+    regions = [args.region] if args.region else HDB.list_regions()
+    for region in regions:
+        print(f"region: {region}")
+        print(f"{'station':<16}{'range_m':>10}{'dominant':>10}"
+              f"{'n_const':>10}")
+        for row in HDB.benchmark_region(region):
+            print(f"{row['station']:<16}{row['range_m']:>10.3f}"
+                  f"{row['dominant']:>10}{row['n_constituents']:>10}")
+        print()
+    return 0
+
+
 def cmd_alert(args) -> int:
     try:
         times, heights = read_csv(args.csv)
@@ -480,6 +539,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_alert.add_argument("--threshold", type=float, default=0.3,
                          help="|residual| (m) that triggers an alert")
     p_alert.set_defaults(func=cmd_alert)
+
+    p_contrib = sub.add_parser("contribute", help="upload a crowd-sourced gauge CSV")
+    p_contrib.add_argument("csv", help="CSV with time,height rows (cheap-sensor upload)")
+    p_contrib.add_argument("lon", type=float, help="station longitude (deg)")
+    p_contrib.add_argument("lat", type=float, help="station latitude (deg)")
+    p_contrib.add_argument("--station", required=True, help="unique station id")
+    p_contrib.add_argument("--store", default=DEFAULT_STORE, help="gauge store dir")
+    p_contrib.add_argument("--source", default="crowd", help="uploader/source tag")
+    p_contrib.set_defaults(func=cmd_contribute)
+
+    p_net = sub.add_parser("network", help="show the crowd-sourced network effect")
+    p_net.add_argument("--store", default=DEFAULT_STORE, help="gauge store dir")
+    p_net.add_argument("--threshold", type=float, default=0.95,
+                       help="EOF variance threshold (0..1)")
+    p_net.set_defaults(func=cmd_network)
+
+    p_val = sub.add_parser("validate", help="global coverage + per-region benchmark")
+    p_val.add_argument("--region", default=None, help="limit to one region")
+    p_val.set_defaults(func=cmd_validate)
     return ap
 
 

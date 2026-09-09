@@ -11,6 +11,7 @@ from tideglass.marea.calibration import (
     crps_gaussian,
     evaluate_calibration,
 )
+from tideglass.marea.crowdsource import GaugeStore
 from tideglass.marea.export import (
     read_netcdf,
     to_json,
@@ -19,6 +20,12 @@ from tideglass.marea.export import (
     write_json,
     write_netcdf,
     write_xtide,
+)
+from tideglass.marea.harmonics_db import (
+    add_harmonic_file,
+    benchmark_region,
+    coverage_report,
+    load_station,
 )
 from tideglass.marea.kalman import JointModel
 from tideglass.marea.model import Prediction, TideModel
@@ -29,15 +36,20 @@ from tideglass.web import run_server
 
 __all__ = [
     "Advice",
+    "GaugeStore",
     "JointModel",
     "Prediction",
     "StationWatch",
     "TideAdvisor",
     "TideModel",
+    "add_harmonic_file",
+    "benchmark_region",
     "build_dashboard",
     "constituent_attribution",
+    "coverage_report",
     "crps_gaussian",
     "evaluate_calibration",
+    "load_station",
     "marea",
     "marine",
     "read_netcdf",
