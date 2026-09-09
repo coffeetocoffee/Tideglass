@@ -1,11 +1,13 @@
 """Benchmark tests: metrics are unit-tested in test_metrics.py; here the CLI
 head-to-head (Marea vs real pytides) on synthetic gauge data."""
 
-import numpy as np
-import pytest
 from datetime import datetime, timedelta, timezone
 
-from tideglass.cli import _load_pytides, build_parser, main as cli_main
+import numpy as np
+import pytest
+
+from tideglass.cli import _load_pytides, build_parser
+from tideglass.cli import main as cli_main
 from tideglass.marea import constituents as C
 from tideglass.marea.solver import rad_per_hour
 
@@ -25,8 +27,7 @@ def _gauge_csv(path, days=40, seed=21):
     y = y + np.random.default_rng(seed).normal(0.0, 0.02, size=t.size)
     with open(path, "w") as fh:
         fh.write("time,height\n")
-        for ti, hi in zip(times, y):
-            fh.write("%s,%.4f\n" % (ti.isoformat(), hi))
+        fh.writelines("%s,%.4f\n" % (ti.isoformat(), hi) for ti, hi in zip(times, y))
     return str(path)
 
 

@@ -1,8 +1,9 @@
 """Tests for the marine layer (species / harvesting / rip / advisor)."""
 
+from datetime import datetime, timedelta, timezone
+
 import numpy as np
 import pytest
-from datetime import datetime, timedelta, timezone
 
 from tideglass import TideAdvisor, TideModel
 from tideglass.cli import main as cli_main
@@ -77,8 +78,7 @@ def test_cli_advise(tmp_path, capsys):
     csv = tmp_path / "cove.csv"
     with open(csv, "w") as fh:
         fh.write("time,height\n")
-        for t, v in zip(times, h + 0.7):
-            fh.write(f"{t.isoformat()},{v:.4f}\n")
+        fh.writelines(f"{t.isoformat()},{v:.4f}\n" for t, v in zip(times, h + 0.7))
     store = str(tmp_path / "store")
     assert cli_main(["fit", str(csv), "--station", "Cove", "--store", store,
                      "--no-select"]) == 0

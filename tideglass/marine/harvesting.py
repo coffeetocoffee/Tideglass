@@ -46,7 +46,7 @@ def safe_windows(
             continue
         out.append(HarvestWindow(
             start, end,
-            f"low-water exposure ≥ {min_hours:g}h, no surge in prior "
+            f"low-water exposure >= {min_hours:g}h, no surge in prior "
             f"{surge_guard_hours:g}h",
         ))
     return out

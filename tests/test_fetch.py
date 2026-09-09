@@ -1,7 +1,6 @@
 """Tests for NOAA CO-OPS ingestion (parse path, no network)."""
 
-from tideglass.fetch import parse_noaa_csv, write_csv, _fmt_date
-
+from tideglass.fetch import _fmt_date, parse_noaa_csv, write_csv
 
 _SAMPLE = """Date Time,Water Level,Sigma,OO,O,F,R,L,Q
 2024-01-01 00:00,1.234,0.001,0,1,0,0,0,1

@@ -24,6 +24,7 @@ import numpy as np
 class EOFResult:
     stations: list[str]
     modes: np.ndarray  # (n_modes × n_time) orthonormal temporal modes
+    loadings: np.ndarray  # (n_stations × n_modes) spatial weights per mode
     explained: np.ndarray  # variance fraction per kept mode
     total_explained: float
     reconstructed: dict[str, np.ndarray]
@@ -63,8 +64,91 @@ def harmonize(
     return EOFResult(
         stations=names,
         modes=Vt[:n_modes],
+        loadings=Uk,
         explained=frac[:n_modes],
         total_explained=float(frac[:n_modes].sum()),
         reconstructed={k: recon[i] + means[k] for i, k in enumerate(names)},
         means=means,
+    )
+
+
+def _haversine(lon1, lat1, lon2, lat2) -> np.ndarray:
+    """Great-circle distance (km) between coordinate arrays (vectorized)."""
+    lon1, lat1, lon2, lat2 = map(np.radians, (lon1, lat1, lon2, lat2))
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+    return 6371.0088 * 2.0 * np.arcsin(np.sqrt(a))
+
+
+@dataclass(frozen=True)
+class RegionalField:
+    grid_lons: np.ndarray  # (n_grid,) target longitudes
+    grid_lats: np.ndarray  # (n_grid,) target latitudes
+    field: np.ndarray  # (n_grid × n_time) continuous reconstructed field
+    modes: np.ndarray  # (n_modes × n_time) temporal EOFs
+    explained: np.ndarray  # variance fraction per mode
+    total_explained: float
+
+
+def regional_field(
+    eof: EOFResult,
+    stations_coords: dict[str, tuple[float, float]],
+    grid_lons: np.ndarray,
+    grid_lats: np.ndarray,
+    power: float = 2.0,
+    eps_km: float = 1e-6,
+) -> RegionalField:
+    """Interpolate the EOF loadings onto a continuous spatial grid.
+
+    ``harmonize`` produces *per-station* loadings ``Uk`` (each station's weight
+    on every shared mode). Here we treat those loadings as scattered samples of a
+    continuous spatial field and interpolate them across ``(grid_lons,
+    grid_lats)`` with inverse-distance weighting (haversine distances), then
+    rebuild the field as ``Σ_k s_k · w_k(grid) ⊗ mode_k`` — a genuine *gridded*
+    regional field rather than a per-station series.
+
+    :param stations_coords: ``{name: (lon, lat)}`` for the stations in ``eof``.
+    :param grid_lons, grid_lats: 1-D target coordinate arrays (a regular mesh is
+        typical, but any points are fine).
+    :param power: IDW exponent ``p`` (larger = more local).
+    """
+    missing = [s for s in eof.stations if s not in stations_coords]
+    if missing:
+        raise ValueError(f"missing coordinates for stations: {missing}")
+    names = eof.stations
+    slon = np.array([stations_coords[s][0] for s in names], dtype=float)
+    slat = np.array([stations_coords[s][1] for s in names], dtype=float)
+    glon = np.asarray(grid_lons, dtype=float).ravel()
+    glat = np.asarray(grid_lats, dtype=float).ravel()
+    n_grid = glon.size
+    modes = eof.modes  # (n_modes × n_time)
+    n_modes = modes.shape[0]
+    n_time = modes.shape[1]
+    # Recompute the same scaling (s[:n_modes]) that harmonize applied.
+    X = np.stack([eof.reconstructed[s] - eof.means[s] for s in names])
+    s_full = np.linalg.svd(X, compute_uv=False)
+    scale = s_full[:n_modes]
+
+    field = np.zeros((n_grid, n_time))
+    for g in range(n_grid):
+        dist = _haversine(
+            np.full_like(slon, glon[g]), np.full_like(slat, glat[g]), slon, slat
+        )
+        w = 1.0 / (dist + eps_km) ** power
+        wsum = w.sum()
+        if wsum <= 0:
+            w = np.ones_like(w) / w.size
+        else:
+            w = w / wsum
+        # Interpolated loading per mode at this grid point.
+        load = eof.loadings.T @ w  # (n_modes,)
+        field[g] = (scale * load) @ modes
+    return RegionalField(
+        grid_lons=glon,
+        grid_lats=glat,
+        field=field,
+        modes=modes,
+        explained=eof.explained,
+        total_explained=eof.total_explained,
     )

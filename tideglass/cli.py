@@ -20,8 +20,17 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+from tideglass.marea import export as EXPORT
+from tideglass.marea.calibration import (
+    constituent_attribution,
+    evaluate_calibration,
+)
+from tideglass.marea.kalman import JointModel
 from tideglass.marea.metrics import evaluate, peak_tide_error, rmse
 from tideglass.marea.model import TideModel
+from tideglass.marine.alerting import surge_events
+from tideglass.tui import build_dashboard
+from tideglass.web import run_server
 
 DEFAULT_STORE = ".tideglass"
 
@@ -103,6 +112,69 @@ def cmd_predict(args) -> int:
     print("# time height_m lower_m upper_m")
     for t, m, lo, hi in zip(times, pred.mean, pred.lower, pred.upper):
         print(f"{t.isoformat()} {m:.4f} {lo:.4f} {hi:.4f}")
+    return 0
+
+
+def cmd_smooth(args) -> int:
+    try:
+        times, heights = read_csv(args.csv)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass smooth: {exc}", file=sys.stderr)
+        return 2
+    try:
+        model = JointModel.fit(
+            times, heights,
+            auto_select=not args.no_select,
+            alpha=args.alpha,
+            station=args.station,
+        )
+    except ValueError as exc:
+        print(f"tideglass smooth: {exc}", file=sys.stderr)
+        return 2
+    fit = model.fit_result
+    print(f"# station={fit.meta.get('station', args.station)} n={fit.observed.size}")
+    print(f"# secular_trend_mm_yr={fit.trend_mm_yr:+.3f} "
+          f"±{fit.trend_mm_yr_se:.3f}  surge_phi={fit.phi:.3f}  rmse={fit.meta['rmse']:.4f}")
+    print("# time observed model tide surge trend")
+    for t, o, mo, ti, su, tr in zip(
+        times, fit.observed, fit.model, fit.tide, fit.surge, fit.trend
+    ):
+        print(f"{t.isoformat()} {o:.4f} {mo:.4f} {ti:.4f} {su:.4f} {tr:.4f}")
+    return 0
+
+
+def cmd_calibrate(args) -> int:
+    import numpy as np
+
+    try:
+        times, heights = read_csv(args.csv)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass calibrate: {exc}", file=sys.stderr)
+        return 2
+    order = sorted(range(len(times)), key=lambda i: times[i])
+    times = [times[i] for i in order]
+    y = np.array([heights[i] for i in order], dtype=float)
+    n_test = max(24, round(len(times) * args.test_fraction))
+    train_t, train_y = times[:-n_test], y[:-n_test]
+    test_t, test_y = times[-n_test:], y[-n_test:]
+    station = args.station or os.path.splitext(os.path.basename(args.csv))[0]
+
+    model = TideModel.fit(train_t, train_y, alpha=args.alpha, station=station)
+    pred = model.predict(test_t)
+    cal = evaluate_calibration(pred, test_y)
+
+    print(f"station: {station}  train: {len(train_t)}  test: {len(test_t)}")
+    print(f"{'metric':<22}{'value':>12}")
+    print(f"{'crps(m)':<22}{cal['crps']:>12.4f}")
+    print(f"{'rmse(m)':<22}{cal['rmse']:>12.4f}")
+    print(f"{'coverage (empirical)':<22}{cal['coverage_empirical']:>12.4f}")
+    print(f"{'coverage (nominal)':<22}{cal['coverage_nominal']:>12.4f}")
+    attr = constituent_attribution(model, test_t)
+    print("per-constituent variance share:")
+    for name, share in sorted(
+        zip(attr["names"], attr["share"]), key=lambda kv: -kv[1]
+    ):
+        print(f"  {name:<5} {share:7.4f}")
     return 0
 
 
@@ -194,7 +266,7 @@ def cmd_bench(args) -> int:
         winner = "marea" if marea["rmse"] <= pytides_row["rmse"] else "pytides"
         print(f"winner (rmse): {winner}")
     else:
-        print("winner (rmse): marea (uncontested — pytides unavailable)")
+        print("winner (rmse): marea (uncontested - pytides unavailable)")
     return 0
 
 
@@ -245,6 +317,76 @@ def cmd_fetch(args) -> int:
     return 0
 
 
+def _build_day_times(date: str, days: int):
+    day = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return [day + timedelta(hours=h) for h in range(max(1, int(days)) * 24)]
+
+
+def cmd_export(args) -> int:
+    times = _build_day_times(args.date, args.days)
+    model = _load_station(args.store, args.station)
+    if model is None:
+        return 2
+    out = args.out or f"{args.station}.{args.format}"
+    try:
+        if args.format == "json":
+            EXPORT.write_json(model, out)
+        elif args.format == "csv":
+            EXPORT.write_csv(model, times, out)
+        elif args.format == "xtide":
+            EXPORT.write_xtide(model, out, station=args.station)
+        elif args.format == "netcdf":
+            EXPORT.write_netcdf(model, times, out)
+        else:
+            print(f"tideglass export: unknown format {args.format!r}", file=sys.stderr)
+            return 2
+    except ValueError as exc:
+        print(f"tideglass export: {exc}", file=sys.stderr)
+        return 2
+    print(f"exported: {out} ({args.format})")
+    return 0
+
+
+def cmd_serve(args) -> int:
+    print(f"tideglass serve: http://{args.host}:{args.port} "
+          f"(store={args.store}; Ctrl-C to stop)")
+    run_server(args.store, args.host, args.port)
+    return 0
+
+
+def cmd_tui(args) -> int:
+    try:
+        times = _build_day_times(args.date, args.days)
+    except ValueError:
+        print(f"tideglass tui: bad date {args.date!r} (want YYYY-MM-DD)", file=sys.stderr)
+        return 2
+    model = _load_station(args.store, args.station)
+    if model is None:
+        return 2
+    print(build_dashboard(model, times))
+    return 0
+
+
+def cmd_alert(args) -> int:
+    try:
+        times, heights = read_csv(args.csv)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass alert: {exc}", file=sys.stderr)
+        return 2
+    model = _load_station(args.store, args.station)
+    if model is None:
+        return 2
+    events = surge_events(
+        heights, model.predict(times).mean, times,
+        station=args.station, threshold_m=args.threshold,
+    )
+    print(f"station: {args.station}  surge events: {len(events)}")
+    for e in events:
+        print(f"  {e.start.isoformat()} -> {e.end.isoformat()}  "
+              f"peak |residual|={e.peak_residual_m:.3f} m")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="tideglass", description="Tide intelligence engine")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -274,6 +416,23 @@ def build_parser() -> argparse.ArgumentParser:
                          help="baseline to beat")
     p_bench.set_defaults(func=cmd_bench)
 
+    p_smooth = sub.add_parser(
+        "smooth", help="joint Kalman smooth: tide + surge + secular trend"
+    )
+    p_smooth.add_argument("csv", help="CSV file with time,height rows")
+    p_smooth.add_argument("--station", default=None, help="station name (default: CSV stem)")
+    p_smooth.add_argument("--alpha", type=float, default=0.05, help="selection significance")
+    p_smooth.add_argument("--no-select", action="store_true", help="fit principal 8 directly")
+    p_smooth.set_defaults(func=cmd_smooth)
+
+    p_cal = sub.add_parser("calibrate", help="CRPS + coverage calibration on held-out data")
+    p_cal.add_argument("csv", help="CSV file with time,height rows")
+    p_cal.add_argument("--station", default=None, help="station name (default: CSV stem)")
+    p_cal.add_argument("--test-fraction", type=float, default=0.25,
+                       help="held-out fraction (chronological tail)")
+    p_cal.add_argument("--alpha", type=float, default=0.05, help="selection significance")
+    p_cal.set_defaults(func=cmd_calibrate)
+
     p_adv = sub.add_parser("advise", help="harvesting + rip + species advice")
     p_adv.add_argument("station", help="station name")
     p_adv.add_argument("date", help="YYYY-MM-DD (UTC)")
@@ -290,6 +449,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_fetch.add_argument("--interval", default="h", choices=["h", "1", "hilo"],
                          help="passed to NOAA (observed water levels are 6-min)")
     p_fetch.set_defaults(func=cmd_fetch)
+
+    p_export = sub.add_parser("export", help="write model prediction in a feed format")
+    p_export.add_argument("station", help="station name")
+    p_export.add_argument("date", help="YYYY-MM-DD (UTC)")
+    p_export.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
+    p_export.add_argument("--days", type=int, default=1, help="days from midnight")
+    p_export.add_argument("--format", choices=["json", "csv", "xtide", "netcdf"],
+                          default="csv", help="output format")
+    p_export.add_argument("--out", default=None, help="output path (default: <station>.<fmt>)")
+    p_export.set_defaults(func=cmd_export)
+
+    p_serve = sub.add_parser("serve", help="HTTP API: /predict and /advise")
+    p_serve.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
+    p_serve.add_argument("--host", default="127.0.0.1", help="bind host")
+    p_serve.add_argument("--port", type=int, default=8000, help="bind port")
+    p_serve.set_defaults(func=cmd_serve)
+
+    p_tui = sub.add_parser("tui", help="terminal dashboard (predict + advise)")
+    p_tui.add_argument("station", help="station name")
+    p_tui.add_argument("date", help="YYYY-MM-DD (UTC)")
+    p_tui.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
+    p_tui.add_argument("--days", type=int, default=1, help="days from midnight")
+    p_tui.set_defaults(func=cmd_tui)
+
+    p_alert = sub.add_parser("alert", help="surge-flag alerts for a watched station")
+    p_alert.add_argument("csv", help="CSV file with time,height rows (observations)")
+    p_alert.add_argument("--station", default=None, help="station name (default: CSV stem)")
+    p_alert.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
+    p_alert.add_argument("--threshold", type=float, default=0.3,
+                         help="|residual| (m) that triggers an alert")
+    p_alert.set_defaults(func=cmd_alert)
     return ap
 
 

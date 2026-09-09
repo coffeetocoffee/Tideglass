@@ -2,10 +2,9 @@
 
 import json
 import math
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
-import pytest
-from datetime import datetime, timedelta, timezone
 
 from tideglass import TideModel  # top-level export (MVP definition of done)
 from tideglass.cli import main as cli_main
@@ -105,8 +104,7 @@ def test_cli_fit_predict_roundtrip(tmp_path, capsys):
     csv = tmp_path / "obs.csv"
     with open(csv, "w") as fh:
         fh.write("time,height\n")
-        for t, h in zip(train, y):
-            fh.write(f"{t.isoformat()},{h:.4f}\n")
+        fh.writelines(f"{t.isoformat()},{h:.4f}\n" for t, h in zip(train, y))
     store = str(tmp_path / "store")
     assert cli_main(["fit", str(csv), "--station", "T", "--store", store,
                      "--alpha", "1e-4"]) == 0
@@ -142,8 +140,8 @@ def test_naive_datetimes_are_utc():
 
 
 def test_basis_matrix_matches_per_element():
-    from tideglass.marea.model import _basis_matrix, _design_row
     from tideglass.marea import constituents as C
+    from tideglass.marea.model import _basis_matrix, _design_row
 
     times = _hourly(T0, 73)
     consts = C.principal()
