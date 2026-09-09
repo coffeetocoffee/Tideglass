@@ -33,5 +33,46 @@ jobs:
           python -m pip install --upgrade pip build
           python -m build
 
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+      # Publish via PyPI Trusted Publishing (OIDC). This exchanges the
+      # GitHub-issued OIDC token for a short-lived PyPI token and uploads with
+      # twine — no Docker image and no stored PyPI credentials required.
+      - name: Publish to PyPI (trusted publishing)
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+        run: |
+          python -m pip install --upgrade twine
+          python - <<'PY'
+          import json, os, urllib.parse, urllib.request
+
+          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+          token = os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+
+          # PyPI trusted publishing requires the OIDC `aud` claim to be "pypi".
+          parts = urllib.parse.urlsplit(url)
+          q = dict(urllib.parse.parse_qsl(parts.query))
+          q["audience"] = "pypi"
+          url = urllib.parse.urlunsplit(parts._replace(
+              query=urllib.parse.urlencode(q)))
+
+          req = urllib.request.Request(url, headers={
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/json; api-version=2.0",
+          })
+          with urllib.request.urlopen(req) as r:
+              oidc = json.load(r)["value"]
+
+          mint = urllib.request.Request(
+              "https://pypi.org/_/oidc/mint-token",
+              data=json.dumps({"token": oidc}).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(mint) as r:
+              pypi_token = json.load(r)["token"]
+
+          with open(os.environ["GITHUB_ENV"], "a") as fh:
+              fh.write(f"PYPI_TOKEN={pypi_token}\n")
+          print("minted PyPI token via trusted publishing")
+          PY
+          twine upload --non-interactive -u __token__ -p "$PYPI_TOKEN" dist/*
