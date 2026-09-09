@@ -68,12 +68,52 @@ tideglass network                                             # the network effe
 tideglass validate                                            # coverage + per-region bench
 ```
 
+```bash
+# v0.6 — operational core: nowcast, drift watch, auto-refit
+tideglass fit train.csv --station SF --source noaa-coops:9414290  # provenance pinned
+tideglass nowcast SF feed.csv --hours 24        # assimilate + health + refit if stale
+tideglass poll 9414290 --repeat 24 --sleep-s 3600  # live loop: fetch, nowcast, refit
+```
+
+```bash
+# v0.7 — spatial moat: kriging fields, transfer, global-model bench
+# regional_field() now kriges EOF loadings -> field + field_var (GP uncertainty)
+# response-function transfer seeds short-record stations from a reference port
+tideglass bench data/noaa_9414290_20240101_20240301.csv --station SF \
+    --against tpxo --global-model data/tpxo_sample.csv --lon -122.47 --lat 37.81
+# v0.7.1 — genuine TPXO/FES files (register at tpxo.net / aviso.altimetry.fr;
+# free for research, no redistribution — download the elevation file yourself):
+tideglass bench data/noaa_9414290_20240101_20240301.csv --station SF \
+    --against tpxo --global-model h_tpxo9.v1.nc --lon -122.47 --lat 37.81
+```
+
 ```python
 from tideglass import TideModel, TideAdvisor, JointModel, build_dashboard
+from tideglass import NowcastEngine, HealthMonitor, rerun  # v0.6: operations
+from tideglass import ResponseTransfer, krige_regional, global_model_at  # v0.7
+from tideglass import read_tpxo, tpxo_model_at  # v0.7.1: genuine TPXO/FES
+from tideglass import self_check_tpxo, format_self_check
 from tideglass.marea import export as EX
 
 model = TideModel.fit(times, heights)          # auto-selects constituents
 pred = model.predict(future_times)             # mean / lower / upper
+
+# v0.6: live assimilation + drift watch (no batch refit)
+eng = NowcastEngine(model)
+eng.update(new_times, new_heights)              # recursive Kalman update
+rep = rerun("SF", list(zip(new_times, new_heights)), store=".tideglass")
+print(rep.health)                               # ok, or REFIT + auto-refit applied
+
+# v0.7: gridded field with uncertainty + short-record transfer
+field = regional_field(eof, coords, grid_lons, grid_lats)  # kriging default
+#   field.field (grid x time), field.field_var (GP kriging variance)
+tgt = ResponseTransfer(ref_model, ref_coords, neighbors, tgt_coords
+                       ).refine(short_times, short_heights)
+
+# v0.7.1: genuine global model at a gauge + pipeline self-check
+glob = tpxo_model_at("h_tpxo9.v1.nc", -122.47, 37.81)  # nearest water point
+print(format_self_check(self_check_tpxo(                      # vs NOAA pub.
+    "h_tpxo9.v1.nc", -122.47, 37.81, "US West Coast", "San Francisco")))
 
 # v0.3: estimate tide + surge + secular trend jointly
 joint = JointModel.fit(times, heights)
@@ -122,15 +162,24 @@ tideglass/
 │   ├── export.py      # v0.4: CSV/JSON/XTide/NetCDF3 feed adapters
 │   ├── spatial.py    # multi-station EOF harmonization + gridded field
 │   ├── crowdsource.py # v0.5: crowd-sourced gauge network (network effect)
-│   └── harmonics_db.py # v0.5: global coverage from public harmonic databases
+│   ├── harmonics_db.py # v0.5: global coverage from public harmonic databases
+│   ├── nowcast.py    # v0.6: recursive Kalman assimilation + AR(1) surge nowcast
+│   ├── drift.py      # v0.6: rolling coverage/RMSE/bias monitor + refit trigger
+│   ├── provenance.py # v0.6: obs window + source + sha256 pinned in artifacts
+│   ├── ops.py        # v0.6: cold_start / rerun / poll operational flywheel
+│   ├── krige.py      # v0.7: ordinary-kriging / GP spatial harmonics + variance
+│   ├── transfer.py   # v0.7: response-function transfer from reference ports
+│   ├── bench_global.py # v0.7: benchmark vs TPXO/FES-style global grids
+│   └── tpxo.py       # v0.7.1: genuine TPXO/FES NetCDF3 ingestion + self-check
 ├── marine/           # domain layer (consumes predict() only)
 │   ├── knowledge.py / species.py / harvesting.py / rip.py / advisor.py
 │   └── alerting.py   # v0.4: surge-event alerts for watched stations
 ├── web.py            # v0.4: stdlib HTTP API (GET /predict, /advise)
 ├── tui.py            # v0.4: terminal dashboard
 ├── cli.py            # fit / predict / bench / advise / smooth / calibrate /
-│                    #   export / serve / tui / alert / contribute / network / validate
-data/                 # sample NOAA gauge CSVs (San Francisco 9414290)
+│                    #   export / serve / tui / alert / contribute / network /
+│                    #   validate / nowcast / poll (v0.6)
+data/                 # sample NOAA gauge CSVs (SF 9414290) + tpxo_sample.csv
 ```
 
 See `architecture.md` for module boundaries and math, `MVP.md` for the build

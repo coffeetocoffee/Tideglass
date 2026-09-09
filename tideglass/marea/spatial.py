@@ -19,6 +19,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from tideglass.marea.krige import krige_regional
+
 
 @dataclass(frozen=True)
 class EOFResult:
@@ -86,9 +88,11 @@ class RegionalField:
     grid_lons: np.ndarray  # (n_grid,) target longitudes
     grid_lats: np.ndarray  # (n_grid,) target latitudes
     field: np.ndarray  # (n_grid × n_time) continuous reconstructed field
+    field_var: np.ndarray  # (n_grid × n_time) field variance (kriging/GP)
     modes: np.ndarray  # (n_modes × n_time) temporal EOFs
     explained: np.ndarray  # variance fraction per mode
     total_explained: float
+    method: str = "krige"  # "krige" (default, v0.7) or "idw"
 
 
 def regional_field(
@@ -98,20 +102,28 @@ def regional_field(
     grid_lats: np.ndarray,
     power: float = 2.0,
     eps_km: float = 1e-6,
+    method: str = "krige",
+    range_km: float | None = None,
+    nugget_frac: float = 0.05,
 ) -> RegionalField:
     """Interpolate the EOF loadings onto a continuous spatial grid.
 
     ``harmonize`` produces *per-station* loadings ``Uk`` (each station's weight
     on every shared mode). Here we treat those loadings as scattered samples of a
     continuous spatial field and interpolate them across ``(grid_lons,
-    grid_lats)`` with inverse-distance weighting (haversine distances), then
-    rebuild the field as ``Σ_k s_k · w_k(grid) ⊗ mode_k`` — a genuine *gridded*
-    regional field rather than a per-station series.
+    grid_lats)`` to rebuild the field as ``Σ_k s_k · w_k(grid) ⊗ mode_k`` — a
+    genuine *gridded* regional field rather than a per-station series.
 
     :param stations_coords: ``{name: (lon, lat)}`` for the stations in ``eof``.
     :param grid_lons, grid_lats: 1-D target coordinate arrays (a regular mesh is
         typical, but any points are fine).
-    :param power: IDW exponent ``p`` (larger = more local).
+    :param power: IDW exponent ``p`` (used only when ``method="idw"``).
+    :param method: ``"krige"`` (default, v0.7) — ordinary kriging / GP spatial
+        harmonics. The returned field carries a **variance** field
+        (``field_var``): the regional field is itself a random field. Falls back
+        to ``"idw"`` for < 3 stations.
+    :param range_km: kriging covariance decay length (auto if ``None``).
+    :param nugget_frac: kriging nugget as a fraction of the mode variance.
     """
     missing = [s for s in eof.stations if s not in stations_coords]
     if missing:
@@ -121,7 +133,6 @@ def regional_field(
     slat = np.array([stations_coords[s][1] for s in names], dtype=float)
     glon = np.asarray(grid_lons, dtype=float).ravel()
     glat = np.asarray(grid_lats, dtype=float).ravel()
-    n_grid = glon.size
     modes = eof.modes  # (n_modes × n_time)
     n_modes = modes.shape[0]
     n_time = modes.shape[1]
@@ -129,26 +140,36 @@ def regional_field(
     X = np.stack([eof.reconstructed[s] - eof.means[s] for s in names])
     s_full = np.linalg.svd(X, compute_uv=False)
     scale = s_full[:n_modes]
+    means = np.array([eof.means[s] for s in names], dtype=float)
 
-    field = np.zeros((n_grid, n_time))
-    for g in range(n_grid):
-        dist = _haversine(
-            np.full_like(slon, glon[g]), np.full_like(slat, glat[g]), slon, slat
+    if method == "idw" or len(names) < 3:
+        field = np.zeros((glon.size, n_time))
+        for g in range(glon.size):
+            dist = _haversine(
+                np.full_like(slon, glon[g]), np.full_like(slat, glat[g]), slon, slat
+            )
+            w = 1.0 / (dist + eps_km) ** power
+            wsum = w.sum()
+            if wsum <= 0:
+                w = np.ones_like(w) / w.size
+            else:
+                w = w / wsum
+            load = eof.loadings.T @ w  # (n_modes,)
+            field[g] = (scale * load) @ modes + w @ means
+        return RegionalField(
+            grid_lons=glon, grid_lats=glat, field=field,
+            field_var=np.zeros_like(field), modes=modes,
+            explained=eof.explained, total_explained=eof.total_explained,
+            method="idw",
         )
-        w = 1.0 / (dist + eps_km) ** power
-        wsum = w.sum()
-        if wsum <= 0:
-            w = np.ones_like(w) / w.size
-        else:
-            w = w / wsum
-        # Interpolated loading per mode at this grid point.
-        load = eof.loadings.T @ w  # (n_modes,)
-        field[g] = (scale * load) @ modes
+
+    out = krige_regional(
+        modes, eof.loadings, slon, slat, means, glon, glat,
+        scale=scale, range_km=range_km, nugget_frac=nugget_frac,
+    )
     return RegionalField(
-        grid_lons=glon,
-        grid_lats=glat,
-        field=field,
-        modes=modes,
-        explained=eof.explained,
-        total_explained=eof.total_explained,
+        grid_lons=glon, grid_lats=glat,
+        field=out["field"], field_var=out["field_var"], modes=modes,
+        explained=eof.explained, total_explained=eof.total_explained,
+        method="krige",
     )

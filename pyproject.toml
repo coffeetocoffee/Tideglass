@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tideglass"
-version = "0.5.0"
+version = "0.7.1"
 description = "Tide + marine-life intelligence engine (Marea Core math engine)"
 readme = "README.md"
 license = { text = "MIT" }

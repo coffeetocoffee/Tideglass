@@ -1,17 +1,26 @@
 """Command-line interface for Tideglass.
 
     tideglass fit <csv> [--station NAME] [--store DIR] [--alpha A] [--no-select]
+                 [--source S]
     tideglass predict <station> <date> [--store DIR] [--days N]
-    tideglass bench <csv> [--test-fraction F] [--against pytides|none]
+    tideglass bench <csv> [--test-fraction F] [--against pytides|tpxo|none]
+                 [--global-model PATH --lon X --lat Y [--consts M2,S2,...]]
+                 (PATH may be a CSV grid or a genuine TPXO/FES NetCDF3 .nc file)
     tideglass advise <station> <date> [--store DIR] [--days N]
     tideglass fetch <station> <begin> <end> [--out CSV] [--datum D] [--interval I]
+    tideglass nowcast <station> <feed.csv> [--store DIR] [--alpha A]
+                 [--auto-refit | --no-auto-refit] [--hours H]
+    tideglass poll <station> [--store DIR] [--lookback-h H] [--repeat N]
+                 [--sleep-s S] [--datum D] [--alpha A] [--no-auto-refit]
     tideglass contribute <csv> <lon> <lat> --station NAME [--store DIR] [--source S]
     tideglass network [--store DIR] [--threshold F]
     tideglass validate [--region R]
 
 ``fit`` reads ``time,height`` rows (ISO-8601 datetimes, metres) and saves a
 model artifact; ``predict`` prints an hourly height curve with 95% bands;
-``fetch`` downloads a gauge CSV directly from NOAA CO-OPS.
+``fetch`` downloads a gauge CSV directly from NOAA CO-OPS; ``nowcast``
+assimilates a fresh feed into the deployed model (with drift check and
+optional auto-refit); ``poll`` repeats that live against NOAA on a sleep loop.
 """
 
 from __future__ import annotations
@@ -72,12 +81,14 @@ def cmd_fit(args) -> int:
         print(f"tideglass fit: {exc}", file=sys.stderr)
         return 2
     station = args.station or os.path.splitext(os.path.basename(args.csv))[0]
+    source = args.source or f"csv:{args.csv}"
     try:
         model = TideModel.fit(
             times, heights,
             auto_select=not args.no_select,
             alpha=args.alpha,
             station=station,
+            source=source,
         )
     except ValueError as exc:
         print(f"tideglass fit: {exc}", file=sys.stderr)
@@ -86,8 +97,13 @@ def cmd_fit(args) -> int:
     path = os.path.join(args.store, f"{station}.json")
     with open(path, "w") as fh:
         json.dump(model.to_artifact(), fh, indent=2)
+    prov = model.meta
     print(f"station: {station}")
     print(f"observations: {len(times)}  rmse: {model.meta['rmse']:.4f} m")
+    print(f"source: {prov.get('source')}  window: {prov.get('obs_start')} .. "
+          f"{prov.get('obs_end')}")
+    print(f"data_sha256: {prov.get('data_sha256')}  "
+          f"tideglass: {prov.get('tideglass_version')}")
     print("constituents:")
     for f in model.constituents():
         print(f"  {f.name:<5} A={f.amplitude:.4f} m  kappa={f.phase_deg:7.2f} deg")
@@ -227,6 +243,11 @@ def _fmt(x: float) -> str:
 def cmd_bench(args) -> int:
     import numpy as np
 
+    if args.against == "tpxo" and (not args.global_model
+                                   or args.lon is None or args.lat is None):
+        print("tideglass bench: --against tpxo requires --global-model PATH "
+              "and --lon/--lat (gauge coordinates)", file=sys.stderr)
+        return 2
     try:
         times, heights = read_csv(args.csv)
     except (OSError, ValueError) as exc:
@@ -243,7 +264,8 @@ def cmd_bench(args) -> int:
     model = TideModel.fit(train_t, train_y, alpha=args.alpha, station=station)
     marea = evaluate(model.predict(test_t), test_y)
 
-    pytides_row = None
+    rival_name = "pytides" if args.against == "pytides" else "global"
+    rival_row = None
     if args.against == "pytides":
         try:
             tide_mod = _load_pytides()
@@ -252,24 +274,58 @@ def cmd_bench(args) -> int:
             py_mean = np.asarray(
                 pt.at([t.replace(tzinfo=None) for t in test_t]), dtype=float
             ).ravel()
-            pytides_row = {
+            rival_row = {
                 "rmse": rmse(py_mean, test_y),
                 "peak_error": peak_tide_error(py_mean, test_y),
             }
         except Exception as exc:  # noqa: BLE001 - degrade to Marea-only metrics
             print(f"# pytides comparison skipped: {exc}")
+    elif args.against == "tpxo":
+        try:
+            from tideglass.marea.bench_global import compare as compare_global
+
+            if not args.global_model:
+                raise ValueError("--against tpxo requires --global-model PATH")
+            if args.lon is None or args.lat is None:
+                raise ValueError("--against tpxo requires --lon/--lat (gauge coords)")
+            consts = [c.strip() for c in (args.consts or "").split(",") if c.strip()]
+            if args.global_model.lower().endswith(".nc"):
+                # Genuine TPXO/FES elevation file (NetCDF3 classic, no extra deps).
+                from tideglass.marea.tpxo import tpxo_model_at
+
+                global_model = tpxo_model_at(
+                    args.global_model, args.lon, args.lat,
+                    constituents=consts or None, station=station)
+            else:
+                from tideglass.marea.bench_global import (
+                    global_model_at,
+                    read_harmonic_grid,
+                )
+
+                grid = read_harmonic_grid(args.global_model)
+                global_model = global_model_at(grid, args.lon, args.lat)
+            cmp = compare_global(global_model, model, test_t, test_y)
+            rival_row = {
+                "rmse": cmp["global"]["rmse"],
+                "peak_error": cmp["global"]["peak_error"],
+                "ratio": cmp["rmse_ratio_marea_over_global"],
+            }
+        except (OSError, ValueError) as exc:
+            print(f"# global-model comparison skipped: {exc}")
 
     print(f"station: {station}  train: {len(train_t)}  test: {len(test_t)}")
     print(f"{'model':<10}{'rmse(m)':>10}{'peak_err':>10}{'coverage':>10}")
     print(f"{'marea':<10}{marea['rmse']:>10.4f}"
           f"{_fmt(marea['peak_error']):>10}{marea['coverage']:>10.4f}")
-    if pytides_row is not None:
-        print(f"{'pytides':<10}{pytides_row['rmse']:>10.4f}"
-              f"{_fmt(pytides_row['peak_error']):>10}{'n/a':>10}")
-        winner = "marea" if marea["rmse"] <= pytides_row["rmse"] else "pytides"
+    if rival_row is not None:
+        print(f"{rival_name:<10}{rival_row['rmse']:>10.4f}"
+              f"{_fmt(rival_row['peak_error']):>10}{'n/a':>10}")
+        winner = "marea" if marea["rmse"] <= rival_row["rmse"] else rival_name
         print(f"winner (rmse): {winner}")
+        if "ratio" in rival_row:
+            print(f"marea/global rmse ratio: {rival_row['ratio']:.3f}")
     else:
-        print("winner (rmse): marea (uncontested - pytides unavailable)")
+        print("winner (rmse): marea (uncontested - baseline unavailable)")
     return 0
 
 
@@ -317,6 +373,86 @@ def cmd_fetch(args) -> int:
     write_csv(rows, out)
     print(f"station: {args.station}  rows: {len(rows)}  datum: {args.datum}")
     print(f"saved: {out}")
+    return 0
+
+
+def cmd_nowcast(args) -> int:
+    from tideglass.marea import ops as OPS
+
+    os.makedirs(args.store, exist_ok=True)
+    try:
+        rep = OPS.rerun(
+            args.station, args.feed, store=args.store, alpha=args.alpha,
+            auto_refit=args.auto_refit,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"tideglass nowcast: {exc}", file=sys.stderr)
+        return 2
+    print(f"station: {rep.station}  new: {rep.n_new}  skipped: {rep.n_skipped}")
+    if rep.log is not None:
+        print(f"assimilated: {rep.feed_start} .. {rep.feed_end}")
+        print(f"innovation: mean={rep.log.mean_innovation:+.4f} m  "
+              f"rms={rep.log.rms_innovation:.4f} m  "
+              f"surge={rep.log.last_surge:+.4f} m")
+    print(str(rep.health))
+    if rep.refit_done:
+        print("auto-refit: performed (artifact replaced, lineage in refit_history)")
+    elif rep.health.needs_refit:
+        print("recommendation: REFIT (re-run with --auto-refit to apply)")
+    if args.hours > 0:
+        from tideglass.marea.nowcast import load_state as _load_state
+
+        model = TideModel.load_harmonic(
+            os.path.join(args.store, f"{args.station}.json"))
+        eng = _load_state(
+            model, os.path.join(args.store, f"{args.station}.nowcast.json"))
+        last = eng.last_time
+        if last is not None:
+            times = [last + timedelta(hours=h + 1) for h in range(args.hours)]
+            pred = eng.predict(times)
+            print(f"# nowcast {args.hours}h from {last.isoformat()}")
+            print("# time height_m lower_m upper_m")
+            for t, m, lo, hi in zip(times, pred.mean, pred.lower, pred.upper):
+                print(f"{t.isoformat()} {m:.4f} {lo:.4f} {hi:.4f}")
+    return 0
+
+
+def cmd_poll(args) -> int:
+    import time
+
+    from tideglass.marea import ops as OPS
+
+    os.makedirs(args.store, exist_ok=True)
+    passes = 0
+    while True:
+        try:
+            rep = OPS.poll(
+                args.station, store=args.store,
+                lookback_hours=args.lookback_h, alpha=args.alpha,
+                datum=args.datum, auto_refit=args.auto_refit,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"tideglass poll: {exc}", file=sys.stderr)
+            return 2
+        except KeyboardInterrupt:
+            print("tideglass poll: interrupted", file=sys.stderr)
+            return 130
+        passes += 1
+        if rep is None:
+            print(f"[pass {passes}] station={args.station}: no new rows")
+        else:
+            flag = "REFIT" if rep.health.needs_refit and not rep.refit_done else (
+                "refit-applied" if rep.refit_done else "ok")
+            print(f"[pass {passes}] station={args.station} new={rep.n_new} "
+                  f"coverage={rep.health.coverage:.3f} "
+                  f"rmse={rep.health.rmse:.4f} status={flag}")
+        if args.repeat and passes >= args.repeat:
+            break
+        try:
+            time.sleep(args.sleep_s)
+        except KeyboardInterrupt:
+            print("tideglass poll: interrupted", file=sys.stderr)
+            return 130
     return 0
 
 
@@ -456,6 +592,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_fit.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
     p_fit.add_argument("--alpha", type=float, default=0.05, help="selection significance")
     p_fit.add_argument("--no-select", action="store_true", help="fit principal 8 directly")
+    p_fit.add_argument("--source", default=None,
+                       help="provenance tag pinned in the artifact (default: csv:<path>)")
     p_fit.set_defaults(func=cmd_fit)
 
     p_pred = sub.add_parser("predict", help="height curve with 95%% bands")
@@ -471,8 +609,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_bench.add_argument("--test-fraction", type=float, default=0.25,
                          help="held-out fraction (chronological tail)")
     p_bench.add_argument("--alpha", type=float, default=0.05, help="selection significance")
-    p_bench.add_argument("--against", choices=["pytides", "none"], default="pytides",
-                         help="baseline to beat")
+    p_bench.add_argument("--against", choices=["pytides", "tpxo", "none"],
+                         default="pytides",
+                         help="baseline to beat (tpxo = global model grid)")
+    p_bench.add_argument("--global-model", default=None,
+                         help="TPXO/FES harmonic grid: CSV (lon,lat,constituent,"
+                              "amplitude,phase) or genuine NetCDF3 .nc elevation "
+                              "file, for --against tpxo")
+    p_bench.add_argument("--consts", default="M2,S2,N2,K2,K1,O1,P1,Q1",
+                         help="comma-separated constituents to extract from a "
+                              ".nc global file (default: principal 8)")
+    p_bench.add_argument("--lon", type=float, default=None,
+                         help="gauge longitude for --against tpxo")
+    p_bench.add_argument("--lat", type=float, default=None,
+                         help="gauge latitude for --against tpxo")
     p_bench.set_defaults(func=cmd_bench)
 
     p_smooth = sub.add_parser(
@@ -508,6 +658,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_fetch.add_argument("--interval", default="h", choices=["h", "1", "hilo"],
                          help="passed to NOAA (observed water levels are 6-min)")
     p_fetch.set_defaults(func=cmd_fetch)
+
+    p_now = sub.add_parser(
+        "nowcast",
+        help="assimilate a fresh feed into the deployed model (drift check + refit)",
+    )
+    p_now.add_argument("station", help="station name (model artifact in store)")
+    p_now.add_argument("feed", help="CSV file with time,height rows (recent feed)")
+    p_now.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
+    p_now.add_argument("--alpha", type=float, default=0.05,
+                       help="selection significance for auto-refit")
+    p_now.add_argument("--auto-refit", dest="auto_refit", action="store_true",
+                       default=True, help="refit automatically when stale (default)")
+    p_now.add_argument("--no-auto-refit", dest="auto_refit", action="store_false",
+                       help="only report staleness, never refit")
+    p_now.add_argument("--hours", type=int, default=24,
+                       help="nowcast horizon in hours after the feed (0 to skip)")
+    p_now.set_defaults(func=cmd_nowcast)
+
+    p_poll = sub.add_parser(
+        "poll", help="live loop: fetch NOAA, assimilate, health-check, refit"
+    )
+    p_poll.add_argument("station", help="NOAA station id / station name")
+    p_poll.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
+    p_poll.add_argument("--lookback-h", type=int, default=72,
+                        help="hours to fetch back on the first pass")
+    p_poll.add_argument("--repeat", type=int, default=0,
+                        help="passes to run (0 = run forever)")
+    p_poll.add_argument("--sleep-s", type=float, default=3600.0,
+                        help="seconds between passes")
+    p_poll.add_argument("--datum", default="MLLW", help="NOAA vertical datum")
+    p_poll.add_argument("--alpha", type=float, default=0.05,
+                        help="selection significance for auto-refit")
+    p_poll.add_argument("--auto-refit", dest="auto_refit", action="store_true",
+                        default=True, help="refit automatically when stale (default)")
+    p_poll.add_argument("--no-auto-refit", dest="auto_refit", action="store_false",
+                        help="only report staleness, never refit")
+    p_poll.set_defaults(func=cmd_poll)
 
     p_export = sub.add_parser("export", help="write model prediction in a feed format")
     p_export.add_argument("station", help="station name")

@@ -119,19 +119,50 @@ network-effect gain in explained variance: +0.0201
 Each added gauge improves the shared regional field — a real network effect:
 the engine gets strictly better with every upload.
 
-## 6. Reproduce
+## 6. Genuine TPXO/FES ingestion (v0.7.1)
+
+`data/tpxo_sample.csv` is a license-clean stand-in. For the genuine
+heavyweight comparison, operators bring their own licensed file — TPXO
+(`h_tpxo9.v1.nc`, register at https://www.tpxo.net) or FES (via
+https://www.aviso.altimetry.fr; both free for research, redistribution
+forbidden, so the bytes can never ship here). `marea/tpxo.py` reads the
+NetCDF3 elevation file with zero extra dependencies, takes the nearest
+*water* grid point, and converts native `H·cos(ωt − g)` constants by
+predict-then-refit (phase alignment exact by construction).
+
+Validate the pipeline first — TPXO assimilates gauges, so at San Francisco
+it should agree with NOAA's published constants within a few cm / degrees:
+
+```python
+from tideglass import self_check_tpxo, format_self_check
+rep = self_check_tpxo("h_tpxo9.v1.nc", -122.47, 37.81,
+                      "US West Coast", "San Francisco")
+print(format_self_check(rep))   # PASS verdict + per-constituent damp/dphase
+```
+
+A FAIL verdict indicts the file or its layout (try `var_map`), not the
+engine. Then bench the genuine model on a held-out gauge tail:
+
+```bash
+tideglass bench data/noaa_9414290_20240101_20240301.csv --station SF \
+    --against tpxo --global-model h_tpxo9.v1.nc --lon -122.47 --lat 37.81
+```
+
+## 7. Reproduce
 
 ```bash
 pip install -e . && pip install pytides   # pytides optional (runtime shim)
 
 tideglass bench data/noaa_9414290_20240101_20240301.csv --station SF
+tideglass bench data/noaa_9414290_20240101_20240301.csv --station SF \
+    --against tpxo --global-model data/tpxo_sample.csv --lon -122.47 --lat 37.81
 tideglass validate
 tideglass contribute <upload.csv> <lon> <lat> --station <id>
 tideglass network
 python -m pytest tests -q
 ```
 
-## 7. Credits
+## 8. Credits
 
 - Astronomical basis: Schureman, *Special Publication 98*; IERS / Meeus.
 - Gauge data: NOAA CO-OPS (San Francisco 9414290).

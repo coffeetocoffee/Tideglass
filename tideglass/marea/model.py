@@ -137,6 +137,7 @@ class TideModel:
         candidates: Sequence[CON.Constituent] | None = None,
         alpha: float = 0.05,
         station: str | None = None,
+        source: str | None = None,
     ) -> TideModel:
         """Fit a model from gauge observations.
 
@@ -174,10 +175,18 @@ class TideModel:
             for c in selected
         ]
         resid = y - A @ sol.coef
+        from tideglass.marea.provenance import provenance
+
+        meta = provenance(
+            times, heights, source=source, station=station,
+            extra={
+                "n_obs": len(times),
+                "rmse": math.sqrt(float(resid @ resid) / len(times)),
+            },
+        )
         return cls(
             selected, sol.coef, sol.covariance, sol.sigma2, fits,
-            station=station, source="fit",
-            meta={"n_obs": len(times), "rmse": math.sqrt(float(resid @ resid) / len(times))},
+            station=station, source="fit", meta=meta,
         )
 
     @classmethod
@@ -211,9 +220,14 @@ class TideModel:
             coef[2 + 2 * j] = amp * math.sin(kappa)
             fits.append(Fit(e["name"], amp, float(e["phase"]) % 360.0, 0.0))
         p = coef.size
+        restored_meta = dict(data.get("meta", {}))
+        restored_meta.setdefault("source", "harmonic")
+        if "station" not in restored_meta and data.get("station"):
+            restored_meta["station"] = data.get("station")
         return cls(
             consts, coef, np.zeros((p, p)), 0.0, fits,
             station=station or data.get("station"), source="harmonic",
+            meta=restored_meta or None,
         )
 
     # -- use ---------------------------------------------------------------
@@ -242,5 +256,7 @@ class TideModel:
                 {"name": f.name, "amplitude": f.amplitude, "phase": f.phase_deg}
                 for f in self._fits
             ],
-            "meta": {**self.meta, "source": self.source},
+            # The versioned provenance in meta is authoritative; fall back to
+            # the coarse construction tag only when no provenance was pinned.
+            "meta": {"source": self.source, **self.meta},
         }
