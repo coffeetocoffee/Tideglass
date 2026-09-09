@@ -53,6 +53,13 @@ tideglass smooth data/noaa_9414290_20240101_20240301.csv --station SF
 
 # Uncertainty calibration: CRPS + coverage + per-constituent variance shares
 tideglass calibrate data/noaa_9414290_20240101_20240301.csv --station SF
+```  # (v0.8: + PIT + reliability curve + split-conformal bands)
+
+```bash
+# v0.8 — uncertainty as the product: pooling, extremes, calibration
+tideglass pool short.csv --station pier07 --store .tideglass  # borrow strength
+tideglass extremes gauge3yr.csv --station SF --flood 2.5      # GPD return levels
+```
 
 # v0.4 — product surface
 tideglass export SF 2024-02-01 --format netcdf --out sf.nc   # CSV/JSON/XTide/NetCDF
@@ -93,6 +100,8 @@ from tideglass import NowcastEngine, HealthMonitor, rerun  # v0.6: operations
 from tideglass import ResponseTransfer, krige_regional, global_model_at  # v0.7
 from tideglass import read_tpxo, tpxo_model_at  # v0.7.1: genuine TPXO/FES
 from tideglass import self_check_tpxo, format_self_check
+from tideglass import HierarchicalPool, fit_gpd  # v0.8: uncertainty as product
+from tideglass import reliability_curve, conformalize, flood_probability
 from tideglass.marea import export as EX
 
 model = TideModel.fit(times, heights)          # auto-selects constituents
@@ -114,6 +123,16 @@ tgt = ResponseTransfer(ref_model, ref_coords, neighbors, tgt_coords
 glob = tpxo_model_at("h_tpxo9.v1.nc", -122.47, 37.81)  # nearest water point
 print(format_self_check(self_check_tpxo(                      # vs NOAA pub.
     "h_tpxo9.v1.nc", -122.47, 37.81, "US West Coast", "San Francisco")))
+
+# v0.8: uncertainty as the product — pooling, extremes, calibration
+short = HierarchicalPool(network_models).seed_short(         # borrow strength
+    short_times, short_heights, "pier07")      # shrinkage in .meta
+gpd = fit_gpd(declustered_skew_surges, threshold=0.13)        # POT tail
+print(gpd.return_level(100.0, rate_per_year=17.0))            # 100-yr level
+print(reliability_curve(pred, held_out)["empirical"])        # ≈ nominal
+lo, hi, q = conformalize(pred.mean, sig, cal.mean, cal_sig, cal_y)
+print(TideAdvisor(model).advise(
+    future_times, flood_threshold_m=2.5).summary)  # probabilistic threshold
 
 # v0.3: estimate tide + surge + secular trend jointly
 joint = JointModel.fit(times, heights)

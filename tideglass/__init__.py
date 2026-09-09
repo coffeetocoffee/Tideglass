@@ -8,9 +8,14 @@ surface adds export feeds, a stdlib HTTP API, and a terminal dashboard.
 from tideglass import marea, marine
 from tideglass.marea.bench_global import compare, global_model_at, read_harmonic_grid
 from tideglass.marea.calibration import (
+    conformal_quantile,
+    conformalize,
     constituent_attribution,
     crps_gaussian,
     evaluate_calibration,
+    pit_histogram,
+    pit_values,
+    reliability_curve,
 )
 from tideglass.marea.crowdsource import GaugeStore
 from tideglass.marea.drift import HealthMonitor, HealthReport
@@ -23,6 +28,16 @@ from tideglass.marea.export import (
     write_netcdf,
     write_xtide,
 )
+from tideglass.marea.extremes import (
+    GPD,
+    SkewSurge,
+    annual_rate,
+    decluster,
+    fit_gpd,
+    flood_probability,
+    joint_exceedance_probability,
+    skew_surge,
+)
 from tideglass.marea.harmonics_db import (
     add_harmonic_file,
     benchmark_region,
@@ -34,6 +49,7 @@ from tideglass.marea.krige import KrigeField, krige_field, krige_regional
 from tideglass.marea.model import Prediction, TideModel
 from tideglass.marea.nowcast import NowcastEngine, UpdateLog
 from tideglass.marea.ops import OpsReport, cold_start, poll, rerun
+from tideglass.marea.pooling import HierarchicalPool, PooledConstituent
 from tideglass.marea.tpxo import (
     format_self_check,
     native_to_model,
@@ -48,45 +64,60 @@ from tideglass.tui import build_dashboard
 from tideglass.web import run_server
 
 __all__ = [
+    "GPD",
     "Advice",
     "GaugeStore",
     "HealthMonitor",
     "HealthReport",
+    "HierarchicalPool",
     "JointModel",
     "KrigeField",
     "NowcastEngine",
     "OpsReport",
+    "PooledConstituent",
     "Prediction",
     "ResponseTransfer",
+    "SkewSurge",
     "StationWatch",
     "TideAdvisor",
     "TideModel",
     "TransferCoefficients",
     "UpdateLog",
     "add_harmonic_file",
+    "annual_rate",
     "benchmark_region",
     "build_dashboard",
     "cold_start",
     "compare",
+    "conformal_quantile",
+    "conformalize",
     "constituent_attribution",
     "coverage_report",
     "crps_gaussian",
+    "decluster",
     "evaluate_calibration",
+    "fit_gpd",
+    "flood_probability",
     "format_self_check",
     "global_model_at",
+    "joint_exceedance_probability",
     "krige_field",
     "krige_regional",
     "load_station",
     "marea",
     "marine",
     "native_to_model",
+    "pit_histogram",
+    "pit_values",
     "poll",
     "read_harmonic_grid",
     "read_netcdf",
     "read_tpxo",
+    "reliability_curve",
     "rerun",
     "run_server",
     "self_check_tpxo",
+    "skew_surge",
     "surge_events",
     "to_json",
     "to_xtide",

@@ -7,6 +7,7 @@
                  [--global-model PATH --lon X --lat Y [--consts M2,S2,...]]
                  (PATH may be a CSV grid or a genuine TPXO/FES NetCDF3 .nc file)
     tideglass advise <station> <date> [--store DIR] [--days N]
+                  [--flood M] [--surge-sigma S]
     tideglass fetch <station> <begin> <end> [--out CSV] [--datum D] [--interval I]
     tideglass nowcast <station> <feed.csv> [--store DIR] [--alpha A]
                  [--auto-refit | --no-auto-refit] [--hours H]
@@ -20,7 +21,10 @@
 model artifact; ``predict`` prints an hourly height curve with 95% bands;
 ``fetch`` downloads a gauge CSV directly from NOAA CO-OPS; ``nowcast``
 assimilates a fresh feed into the deployed model (with drift check and
-optional auto-refit); ``poll`` repeats that live against NOAA on a sleep loop.
+optional auto-refit); ``poll`` repeats that live against NOAA on a sleep loop;
+``pool`` fits a short record by borrowing strength from the network;
+``extremes`` prints skew-surge stats, GPD return levels, and joint
+tide/surge exceedance.
 """
 
 from __future__ import annotations
@@ -165,6 +169,12 @@ def cmd_smooth(args) -> int:
 def cmd_calibrate(args) -> int:
     import numpy as np
 
+    from tideglass.marea.calibration import (
+        conformalize,
+        pit_histogram,
+        reliability_curve,
+    )
+
     try:
         times, heights = read_csv(args.csv)
     except (OSError, ValueError) as exc:
@@ -173,21 +183,50 @@ def cmd_calibrate(args) -> int:
     order = sorted(range(len(times)), key=lambda i: times[i])
     times = [times[i] for i in order]
     y = np.array([heights[i] for i in order], dtype=float)
+    # Chronological three-way split: fit on the head, conformal scores on the
+    # middle, distribution diagnostics on the tail.
     n_test = max(24, round(len(times) * args.test_fraction))
-    train_t, train_y = times[:-n_test], y[:-n_test]
+    n_calib = max(24, round(len(times) * args.calib_fraction))
+    if len(times) < n_test + n_calib + 72:
+        print(f"tideglass calibrate: need ≥ {n_test + n_calib + 72} rows "
+              f"for a train/calib/test split, got {len(times)}",
+              file=sys.stderr)
+        return 2
+    train_t, train_y = times[:-(n_test + n_calib)], y[:-(n_test + n_calib)]
+    calib_t, calib_y = times[-(n_test + n_calib):-n_test], y[-(n_test + n_calib):-n_test]
     test_t, test_y = times[-n_test:], y[-n_test:]
     station = args.station or os.path.splitext(os.path.basename(args.csv))[0]
 
     model = TideModel.fit(train_t, train_y, alpha=args.alpha, station=station)
     pred = model.predict(test_t)
     cal = evaluate_calibration(pred, test_y)
+    sig_test = (np.asarray(pred.upper) - np.asarray(pred.lower)) / (2.0 * 1.96)
+    pred_calib = model.predict(calib_t)
+    sig_calib = ((np.asarray(pred_calib.upper) - np.asarray(pred_calib.lower))
+                 / (2.0 * 1.96))
 
-    print(f"station: {station}  train: {len(train_t)}  test: {len(test_t)}")
+    print(f"station: {station}  train: {len(train_t)}  "
+          f"calib: {len(calib_t)}  test: {len(test_t)}")
     print(f"{'metric':<22}{'value':>12}")
     print(f"{'crps(m)':<22}{cal['crps']:>12.4f}")
     print(f"{'rmse(m)':<22}{cal['rmse']:>12.4f}")
     print(f"{'coverage (empirical)':<22}{cal['coverage_empirical']:>12.4f}")
     print(f"{'coverage (nominal)':<22}{cal['coverage_nominal']:>12.4f}")
+
+    pit = pit_histogram(test_y, pred.mean, sig_test)
+    print(f"{'pit_mean (want ~0.5)':<22}{pit['pit_mean']:>12.4f}")
+
+    rel = reliability_curve(pred, test_y)
+    print("reliability (nominal -> empirical):")
+    for nom, emp in zip(rel["levels"], rel["empirical"]):
+        print(f"  {nom:>6.2f} -> {emp:6.4f}")
+
+    lo, hi, q = conformalize(pred.mean, sig_test, pred_calib.mean,
+                             sig_calib, calib_y, alpha=args.alpha_level)
+    conf_cov = float(np.mean((lo <= test_y) & (test_y <= hi)))
+    print(f"conformal q (1-a={1.0 - args.alpha_level:.2f}): {q:.4f}  "
+          f"coverage: {conf_cov:.4f}")
+
     attr = constituent_attribution(model, test_t)
     print("per-constituent variance share:")
     for name, share in sorted(
@@ -353,7 +392,9 @@ def cmd_advise(args) -> int:
     if model is None:
         return 2
     times = [day + timedelta(hours=h) for h in range(args.days * 24)]
-    print(TideAdvisor(model).advise(times).summary)
+    print(TideAdvisor(model).advise(
+        times, flood_threshold_m=args.flood,
+        surge_sigma_m=args.surge_sigma).summary)
     return 0
 
 
@@ -582,6 +623,119 @@ def cmd_alert(args) -> int:
     return 0
 
 
+def cmd_pool(args) -> int:
+    from tideglass.marea.pooling import HierarchicalPool
+
+    try:
+        times, heights = read_csv(args.csv)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass pool: {exc}", file=sys.stderr)
+        return 2
+    if not os.path.isdir(args.store):
+        print(f"tideglass pool: no artifact store at {args.store!r} "
+              "(fit the network stations first)", file=sys.stderr)
+        return 2
+    models = {}
+    for fn in sorted(os.listdir(args.store)):
+        if not fn.endswith(".json") or fn[:-5] == args.station:
+            continue
+        path = os.path.join(args.store, fn)
+        try:
+            models[fn[:-5]] = TideModel.load_harmonic(path)
+        except (OSError, ValueError, KeyError):
+            print(f"# skipping {fn}: not a harmonic artifact")
+    if len(models) < 2:
+        print(f"tideglass pool: need ≥ 2 network models in {args.store!r}, "
+              f"found {len(models)}", file=sys.stderr)
+        return 2
+    try:
+        pool = HierarchicalPool(models)
+        pooled = pool.seed_short(times, heights, args.station)
+    except ValueError as exc:
+        print(f"tideglass pool: {exc}", file=sys.stderr)
+        return 2
+    os.makedirs(args.store, exist_ok=True)
+    path = os.path.join(args.store, f"{args.station}.json")
+    with open(path, "w") as fh:
+        json.dump(pooled.to_artifact(), fh, indent=2)
+    print(f"station: {args.station}  network: {len(models)} stations  "
+          f"obs: {len(times)}")
+    print(f"mean_shrinkage: {pooled.meta['mean_shrinkage']:.4f} "
+          "(0 = own data, 1 = pure prior)")
+    print(f"{'constituent':<12}{'own_amp':>10}{'pooled_amp':>12}{'shrinkage':>11}")
+    own_names = {f.name: f for f in
+                 TideModel.fit(times, heights, auto_select=False,
+                               candidates=pool.union).constituents()}
+    for f in pooled.constituents():
+        own_amp = own_names[f.name].amplitude if f.name in own_names else 0.0
+        print(f"{f.name:<12}{own_amp:>10.4f}{f.amplitude:>12.4f}"
+              f"{pooled.meta['shrinkage'][f.name]:>11.4f}")
+    print(f"saved: {path}")
+    return 0
+
+
+def cmd_extremes(args) -> int:
+    import numpy as np
+
+    from tideglass.marea.extremes import (
+        annual_rate,
+        decluster,
+        fit_gpd,
+        joint_exceedance_probability,
+        skew_surge,
+    )
+
+    try:
+        times, heights = read_csv(args.csv)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass extremes: {exc}", file=sys.stderr)
+        return 2
+    order = sorted(range(len(times)), key=lambda i: times[i])
+    times = [times[i] for i in order]
+    y = np.array([heights[i] for i in order], dtype=float)
+    station = args.station or os.path.splitext(os.path.basename(args.csv))[0]
+    try:
+        model = TideModel.fit(
+            times, y, auto_select=not args.no_select, alpha=args.alpha,
+            station=station)
+        sk = skew_surge(times, y, model.predict(times).mean)
+        thresh = float(np.quantile(sk.skew, args.threshold_q))
+        _, kv = decluster(sk.times, sk.skew, gap_hours=args.gap_h,
+                          threshold=thresh)
+        g = fit_gpd(kv, threshold=thresh)
+    except ValueError as exc:
+        print(f"tideglass extremes: {exc}", file=sys.stderr)
+        return 2
+    rate = annual_rate(times, g.n_peaks)
+    print(f"station: {station}  obs: {len(times)}  "
+          f"high waters: {len(sk.times)}")
+    print(f"skew surge: max={float(np.max(sk.skew)):.4f} m  "
+          f"mean={float(np.mean(sk.skew)):.4f} m")
+    print(f"declustered peaks: {len(kv)}  threshold: {thresh:.4f} m  "
+          f"exceedances: {g.n_peaks}  rate: {rate:.2f}/yr")
+    print(f"GPD: loc={g.loc:.4f} m  scale={g.scale:.4f} m  shape={g.shape:+.4f}")
+    try:
+        periods = [float(p) for p in args.return_periods.split(",") if p.strip()]
+    except ValueError:
+        print("tideglass extremes: bad --return-periods "
+              "(want e.g. '1,10,100')", file=sys.stderr)
+        return 2
+    print("return level (m):")
+    for t in periods:
+        print(f"  {t:>8g}-yr  {g.return_level(t, rate):.4f}")
+    resid = y - model.predict(times).mean
+    total = model.predict(times).mean + resid
+    levels = sorted({float(np.quantile(total, 0.99)),
+                     float(np.quantile(total, 0.999))}
+                    | ({float(args.flood)} if args.flood is not None else set()))
+    print("joint exceedance P(tide+surge > level):")
+    for z in levels:
+        p = joint_exceedance_probability(
+            model.predict(times).mean, resid, z)
+        print(f"  {z:7.4f} m  p_hour={p:.6f}  ~{p * 8760.0:.1f} h/yr")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="tideglass", description="Tide intelligence engine")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -634,12 +788,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_smooth.add_argument("--no-select", action="store_true", help="fit principal 8 directly")
     p_smooth.set_defaults(func=cmd_smooth)
 
-    p_cal = sub.add_parser("calibrate", help="CRPS + coverage calibration on held-out data")
+    p_cal = sub.add_parser("calibrate", help="CRPS + PIT + reliability + "
+                                            "conformal calibration on held-out data")
     p_cal.add_argument("csv", help="CSV file with time,height rows")
     p_cal.add_argument("--station", default=None, help="station name (default: CSV stem)")
     p_cal.add_argument("--test-fraction", type=float, default=0.25,
-                       help="held-out fraction (chronological tail)")
+                       help="held-out fraction for diagnostics (chronological tail)")
+    p_cal.add_argument("--calib-fraction", type=float, default=0.2,
+                       help="held-out fraction for conformal scores "
+                            "(chronological middle)")
     p_cal.add_argument("--alpha", type=float, default=0.05, help="selection significance")
+    p_cal.add_argument("--alpha-level", type=float, default=0.05,
+                       help="conformal miscoverage level (bands cover 1-alpha)")
     p_cal.set_defaults(func=cmd_calibrate)
 
     p_adv = sub.add_parser("advise", help="harvesting + rip + species advice")
@@ -647,6 +807,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_adv.add_argument("date", help="YYYY-MM-DD (UTC)")
     p_adv.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
     p_adv.add_argument("--days", type=int, default=1, help="days from midnight")
+    p_adv.add_argument("--flood", type=float, default=None,
+                       help="alarm level (m): price P(level > flood) per time "
+                            "(e.g. a GPD return level from `tideglass extremes`)")
+    p_adv.add_argument("--surge-sigma", type=float, default=0.0,
+                       help="surge std (m) folded into the flood probability")
     p_adv.set_defaults(func=cmd_advise)
 
     p_fetch = sub.add_parser("fetch", help="download NOAA CO-OPS gauge CSV")
@@ -745,6 +910,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_val = sub.add_parser("validate", help="global coverage + per-region benchmark")
     p_val.add_argument("--region", default=None, help="limit to one region")
     p_val.set_defaults(func=cmd_validate)
+
+    p_pool = sub.add_parser(
+        "pool", help="partially-pooled model for a short record "
+                     "(borrows strength from the network in --store)")
+    p_pool.add_argument("csv", help="CSV file with time,height rows (short record)")
+    p_pool.add_argument("--station", required=True, help="new station name")
+    p_pool.add_argument("--store", default=DEFAULT_STORE, help="network artifact directory")
+    p_pool.set_defaults(func=cmd_pool)
+
+    p_ext = sub.add_parser(
+        "extremes", help="skew-surge + GPD return levels + joint exceedance")
+    p_ext.add_argument("csv", help="CSV file with time,height rows (long record)")
+    p_ext.add_argument("--station", default=None, help="station name (default: CSV stem)")
+    p_ext.add_argument("--alpha", type=float, default=0.05, help="selection significance")
+    p_ext.add_argument("--no-select", action="store_true", help="fit principal 8 directly")
+    p_ext.add_argument("--threshold-q", type=float, default=0.9,
+                       help="POT threshold as a quantile of the skew-surge series")
+    p_ext.add_argument("--gap-h", type=float, default=72.0,
+                       help="declustering gap in hours (one storm = one peak)")
+    p_ext.add_argument("--return-periods", default="1,2,5,10,25,50,100",
+                       help="comma-separated return periods (years)")
+    p_ext.add_argument("--flood", type=float, default=None,
+                       help="alarm level (m) for the joint-exceedance table")
+    p_ext.set_defaults(func=cmd_extremes)
     return ap
 
 

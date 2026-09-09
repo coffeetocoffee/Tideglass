@@ -15,6 +15,48 @@ All notable changes to Tideglass are documented here. The format is based on
   are replaced by `ValueError`/`OSError` messages carrying NOAA's own error
   text (e.g. "Range Limit Exceeded"), so failures are diagnosable at a glance.
 
+## [0.8.0]
+Milestone "Uncertainty as the product" — released.
+
+### Added
+- `marea/pooling.py` — hierarchical partial pooling across the station
+  network: per-constituent empirical-Bayes shrinkage of `(a, b)` toward the
+  regional prior (DerSimonian–Laird between-station spread; inverse-variance
+  mean, or inverse-distance neighbour mean when coords are known). Long
+  records keep weight ≈ 1; short/cheap sensors shrink hard and impute
+  unselected constituents from the prior. H0 stays local (datums differ);
+  output is a plain `TideModel`. `HierarchicalPool.pool` / `seed_short` /
+  `report`; `tideglass pool <short.csv> --station NAME --store DIR`.
+- `marea/extremes.py` — extreme value analysis: `skew_surge` (obs−pred at
+  predicted high waters), runs-declustering (`decluster`), peaks-over-
+  threshold GPD fit by maximum likelihood (`fit_gpd`, dependency-free
+  Nelder–Mead), `GPD.survival` / `return_level`, `annual_rate`,
+  `joint_exceedance_probability`, and `flood_probability` — the probabilistic
+  threshold replacing heuristic cutoffs. CLI `tideglass extremes <csv>
+  [--threshold-q Q] [--gap-h H] [--return-periods ...] [--flood M]`.
+- Calibration graduation (`marea/calibration.py`): `pit_values` /
+  `pit_histogram` (exact-erf PIT uniformity), `reliability_curve` (empirical
+  vs nominal coverage via Acklam's inverse normal CDF), `conformal_quantile`
+  / `conformalize` (normalized split-conformal bands with the finite-sample
+  guarantee). `tideglass calibrate` now runs a chronological train/calib/test
+  split (`--calib-fraction`, `--alpha-level`).
+- Marine hook: `TideAdvisor.advise(..., flood_threshold_m=,
+  surge_sigma_m=)` prices `P(level > threshold)` per time from the prediction
+  band; `Advice` gains `flood` / `flood_threshold_m` (default `None`, thin
+  consumer unchanged otherwise).
+- Public API now exports `HierarchicalPool`, `PooledConstituent`, `GPD`,
+  `SkewSurge`, `fit_gpd`, `skew_surge`, `decluster`, `annual_rate`,
+  `joint_exceedance_probability`, `flood_probability`, `pit_values`,
+  `pit_histogram`, `reliability_curve`, `conformal_quantile`, `conformalize`.
+
+### Notes
+- Real-data checks (NOAA San Francisco 9414290, 2022–2024 hourly): 51
+  declustered storms, GPD(0.13 m, σ=0.082 m, ξ≈+0.01), 10-yr skew-surge level
+  0.56 m / 100-yr 0.76 m; reliability 0.50→0.49 … 0.99→0.99 on a 3-yr
+  train/calib/test split, while the PIT mean (0.30) flags a −0.6σ seasonal
+  low-water bias the symmetric band hides. EVA refuses short records with a
+  clear error (GPD needs ≥ 10 exceedances) instead of fitting junk.
+
 ## [0.7.1]
 Closes the v0.7 TPXO caveat: genuine global-model files are now a supported
 bench path (no more "drop a real extraction in the same schema" hope).
