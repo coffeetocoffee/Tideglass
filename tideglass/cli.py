@@ -358,12 +358,12 @@ def cmd_advise(args) -> int:
 
 
 def cmd_fetch(args) -> int:
-    from tideglass.fetch import fetch_noaa, write_csv
+    from tideglass.fetch import fetch_noaa_range, write_csv
 
     out = args.out or f"{args.station}.csv"
     try:
-        rows = fetch_noaa(args.station, args.begin, args.end,
-                          datum=args.datum, interval=args.interval)
+        rows = fetch_noaa_range(args.station, args.begin, args.end,
+                                datum=args.datum, interval=args.interval)
     except (OSError, ValueError) as exc:
         print(f"tideglass fetch: {exc}", file=sys.stderr)
         return 2

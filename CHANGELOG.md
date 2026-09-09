@@ -6,6 +6,15 @@ All notable changes to Tideglass are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- `fetch` / `poll` no longer fail on NOAA CO-OPS' **31-day per-request range
+  limit** (the CI `realdata-bench` job's 45-day window got HTTP 400/422
+  "Range Limit Exceeded"). New `fetch_noaa_range` transparently chunks long
+  windows at 30 days with a 1-hour seam overlap, sorts, and dedupes;
+  `tideglass fetch` and `ops.poll` use it. Raw `urllib` HTTPError tracebacks
+  are replaced by `ValueError`/`OSError` messages carrying NOAA's own error
+  text (e.g. "Range Limit Exceeded"), so failures are diagnosable at a glance.
+
 ## [0.7.1]
 Closes the v0.7 TPXO caveat: genuine global-model files are now a supported
 bench path (no more "drop a real extraction in the same schema" hope).

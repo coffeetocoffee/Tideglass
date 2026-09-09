@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
-from tideglass.fetch import fetch_noaa
+from tideglass.fetch import fetch_noaa_range
 from tideglass.marea.drift import HealthMonitor, HealthReport
 from tideglass.marea.model import TideModel
 from tideglass.marea.nowcast import (
@@ -285,9 +285,11 @@ def poll(
 
     The window starts at the persisted ``last_end`` cursor (minus a 1-hour
     overlap for safety) or, on first run, ``end - lookback_hours``. Returns
-    ``None`` when the source has no new rows.
+    ``None`` when the source has no new rows. Fetches through
+    :func:`~tideglass.fetch.fetch_noaa_range`, which chunks at NOAA's 31-day
+    per-request limit, so any ``lookback_hours`` works.
     """
-    get = fetcher or fetch_noaa
+    get = fetcher or fetch_noaa_range
     paths = _paths(store, station)
     end = end or datetime.now(timezone.utc)
     last_end: datetime | None = None
