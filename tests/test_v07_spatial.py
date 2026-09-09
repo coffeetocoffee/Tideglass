@@ -271,9 +271,14 @@ def test_compare_prefers_gauge_fit_over_coarse_global(tmp_path):
     assert cmp["rmse_ratio_marea_over_global"] < 1.0
 
 
-def test_cli_bench_against_tpxo(tmp_path, capsys):
-    from tests.test_v06_ops import _write_csv  # reuse the CSV writer
+def _write_csv(path, times, heights):
+    """Local gauge-CSV writer (tests are not an importable package on CI)."""
+    with open(path, "w") as fh:
+        fh.write("time,height\n")
+        fh.writelines(f"{t.isoformat()},{h:.4f}\n" for t, h in zip(times, heights))
 
+
+def test_cli_bench_against_tpxo(tmp_path, capsys):
     train = _hourly(T0, 30 * 24)
     test = _hourly(train[-1] + timedelta(hours=1), 7 * 24)
     y = np.concatenate([_tide(train), _tide(test)])
@@ -292,8 +297,6 @@ def test_cli_bench_against_tpxo(tmp_path, capsys):
 
 
 def test_cli_bench_tpxo_requires_args(tmp_path):
-    from tests.test_v06_ops import _write_csv
-
     train = _hourly(T0, 48)
     csvp = tmp_path / "g.csv"
     _write_csv(str(csvp), train, _tide(train))
