@@ -8,11 +8,11 @@ already consumes (:meth:`~tideglass.marea.model.TideModel.load_harmonic`): a
 
 This module loads such a grid and evaluates Marea Core against it on held-out
 gauge observations, using the same ``metrics`` the pytides bench uses — so the
-comparison is apples-to-apples. The bundled ``data/tpxo_sample.csv`` is a small,
-clearly-labelled *representative* stand-in (derived from NOAA published constants
-for the San Francisco region with a coarse grid and a few constituents dropped,
-emulating a low-resolution global product); drop a real TPXO/FES extraction in the
-same schema and the same command benchmarks the genuine model.
+comparison is apples-to-apples. The bundled ``data/grids/tpxo_sample.csv`` is a
+small, clearly-labelled *representative* stand-in (derived from NOAA published
+constants for the San Francisco region with a coarse grid and a few constituents
+dropped, emulating a low-resolution global product); drop a real TPXO/FES
+extraction in the same schema and the same command benchmarks the genuine model.
 
 Only harmonic math is touched; no network calls.
 """

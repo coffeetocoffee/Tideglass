@@ -48,7 +48,7 @@ bench path (no more "drop a real extraction in the same schema" hope).
 - TPXO (OSU) and FES (AVISO/LEGOS) files are free for research but forbid
   redistribution: they can never ship in this repo. Operators register at
   https://www.tpxo.net / https://www.aviso.altimetry.fr, download the
-  elevation file, and bench it directly. `data/tpxo_sample.csv` stays as the
+  elevation file, and bench it directly. `data/grids/tpxo_sample.csv` stays as the
   license-clean CI stand-in; all NetCDF3 test fixtures are generated in-test
   (no licensed bytes anywhere).
 
@@ -73,7 +73,7 @@ Milestone "From interpolation to physics (the spatial moat)" — released.
   (TPXO/FES): reads a `lon,lat,constituent,amplitude,phase` harmonic grid,
   builds the global model at the gauge (nearest or IDW blend), and scores
   marea vs global with the same held-out metrics as the pytides bench.
-  `data/tpxo_sample.csv` bundles a clearly-labelled representative grid
+  `data/grids/tpxo_sample.csv` bundles a clearly-labelled representative grid
   (derived from NOAA SF constants, coarse mesh, 5 constituents); drop a real
   TPXO/FES extraction in the same schema to bench the genuine model.
 - CLI: `tideglass bench --against tpxo --global-model PATH --lon X --lat Y`

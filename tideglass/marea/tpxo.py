@@ -14,7 +14,8 @@ converts the native ``H·cos(ωt − g)`` constants into Tideglass convention.
 register at https://www.tpxo.net (TPXO) or https://www.aviso.altimetry.fr
 (FES), download the elevation file themselves, and point
 ``tideglass bench --against tpxo --global-model h_tpxo9.v1.nc`` at it.
-``data/tpxo_sample.csv`` remains the license-clean stand-in for CI and demos.
+``data/grids/tpxo_sample.csv`` remains the license-clean stand-in for CI and
+demos.
 
 **Phase-convention conversion without formula risk:** instead of converting
 Greenwich phases to NOAA kappa (κ) by sign/epoch algebra, we predict the model

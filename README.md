@@ -80,7 +80,7 @@ tideglass poll 9414290 --repeat 24 --sleep-s 3600  # live loop: fetch, nowcast, 
 # regional_field() now kriges EOF loadings -> field + field_var (GP uncertainty)
 # response-function transfer seeds short-record stations from a reference port
 tideglass bench data/noaa_9414290_20240101_20240301.csv --station SF \
-    --against tpxo --global-model data/tpxo_sample.csv --lon -122.47 --lat 37.81
+    --against tpxo --global-model data/grids/tpxo_sample.csv --lon -122.47 --lat 37.81
 # v0.7.1 — genuine TPXO/FES files (register at tpxo.net / aviso.altimetry.fr;
 # free for research, no redistribution — download the elevation file yourself):
 tideglass bench data/noaa_9414290_20240101_20240301.csv --station SF \
@@ -179,7 +179,8 @@ tideglass/
 ├── cli.py            # fit / predict / bench / advise / smooth / calibrate /
 │                    #   export / serve / tui / alert / contribute / network /
 │                    #   validate / nowcast / poll (v0.6)
-data/                 # sample NOAA gauge CSVs (SF 9414290) + tpxo_sample.csv
+data/                 # sample NOAA gauge CSVs (SF 9414290); grids/ has the
+│                     #   TPXO-style harmonic-grid stand-in (tpxo_sample.csv)
 ```
 
 See `architecture.md` for module boundaries and math, `MVP.md` for the build

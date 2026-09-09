@@ -121,7 +121,7 @@ the engine gets strictly better with every upload.
 
 ## 6. Genuine TPXO/FES ingestion (v0.7.1)
 
-`data/tpxo_sample.csv` is a license-clean stand-in. For the genuine
+`data/grids/tpxo_sample.csv` is a license-clean stand-in. For the genuine
 heavyweight comparison, operators bring their own licensed file — TPXO
 (`h_tpxo9.v1.nc`, register at https://www.tpxo.net) or FES (via
 https://www.aviso.altimetry.fr; both free for research, redistribution
@@ -155,7 +155,7 @@ pip install -e . && pip install pytides   # pytides optional (runtime shim)
 
 tideglass bench data/noaa_9414290_20240101_20240301.csv --station SF
 tideglass bench data/noaa_9414290_20240101_20240301.csv --station SF \
-    --against tpxo --global-model data/tpxo_sample.csv --lon -122.47 --lat 37.81
+    --against tpxo --global-model data/grids/tpxo_sample.csv --lon -122.47 --lat 37.81
 tideglass validate
 tideglass contribute <upload.csv> <lon> <lat> --station <id>
 tideglass network
