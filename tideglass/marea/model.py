@@ -37,11 +37,9 @@ import numpy as np
 from tideglass.marea import constituents as CON
 from tideglass.marea.astronomy import (
     D2R,
-    _astro_state_array,
     doodson_args,
     julian_day,
     nodal_factor,
-    nodal_factor_array,
 )
 from tideglass.marea.selection import Candidate, select
 from tideglass.marea.solver import rad_per_hour, solve_matrix
@@ -82,25 +80,17 @@ def _design_row(c: CON.Constituent, t: datetime) -> tuple:
 
 
 def _basis_matrix(constituents: Sequence[CON.Constituent],
-                  times: Sequence[datetime]) -> np.ndarray:
-    times = list(times)
-    n, m = len(times), len(constituents)
-    A = np.empty((n, 1 + 2 * m))
-    A[:, 0] = 1.0
-    if n and m:
-        # Vectorized over time: one (cheap) pass per constituent, the nodal
-        # kernel evaluated on arrays instead of a per-(c, t) Python loop.
-        state = _astro_state_array(times)
-        # Order matches doodson_args(): (tau, s, h, p, N, pp).
-        args = np.array([state[k] for k in ("tau", "s", "h", "p", "N", "pp")])
-        for j, c in enumerate(constituents):
-            dood = np.array(c.doodson, dtype=float)
-            V = (dood @ args + c.phase0) % 360.0
-            f, u = nodal_factor_array(c, state)
-            theta = (V + u) * D2R
-            A[:, 1 + 2 * j] = f * np.cos(theta)
-            A[:, 2 + 2 * j] = f * np.sin(theta)
-    return A
+                   times: Sequence[datetime],
+                   kernel: str = "numpy") -> np.ndarray:
+    """Tidal design matrix ``[1, cos, sin, …]`` for the given constituents/times.
+
+    ``kernel`` selects the numeric backend (see :mod:`tideglass.marea.kernel`):
+    ``"numpy"`` (default, always available) or ``"auto"``/``"numba"`` (fused JIT
+    path when Numba is installed). All backends are numerically equivalent.
+    """
+    from tideglass.marea.kernel import basis_matrix as _kernel_basis
+
+    return _kernel_basis(constituents, times, backend=kernel)
 
 
 class TideModel:
@@ -138,6 +128,7 @@ class TideModel:
         alpha: float = 0.05,
         station: str | None = None,
         source: str | None = None,
+        kernel: str = "numpy",
     ) -> TideModel:
         """Fit a model from gauge observations.
 
@@ -165,7 +156,7 @@ class TideModel:
             selected = list(candidates)
         if not selected:
             raise ValueError("no constituents selected/fitted")
-        A = _basis_matrix(selected, times)
+        A = _basis_matrix(selected, times, kernel=kernel)
         sol = solve_matrix(A, y, [c.name for c in selected])
         by_term = {t.name: t for t in sol.terms}
         fits = [
@@ -232,10 +223,11 @@ class TideModel:
 
     # -- use ---------------------------------------------------------------
 
-    def predict(self, times: Sequence[datetime], z: float = _Z95) -> Prediction:
+    def predict(self, times: Sequence[datetime], z: float = _Z95,
+                 kernel: str = "numpy") -> Prediction:
         """Predict ``height ±`` band at ``times`` (95% prediction interval)."""
         times = list(times)
-        A = _basis_matrix(self._constituents, times)
+        A = _basis_matrix(self._constituents, times, kernel=kernel)
         mean = A @ self._coef
         var_mean = np.maximum(np.einsum("ij,jk,ik->i", A, self._covariance, A), 0.0)
         se = np.sqrt(var_mean)

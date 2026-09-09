@@ -66,8 +66,16 @@ PRINCIPAL_8 = ["M2", "S2", "N2", "K2", "K1", "O1", "P1", "Q1"]
 
 
 def get(name: str) -> Constituent:
-    """Look up a constituent by name (raises ``KeyError`` if unknown)."""
-    return BY_NAME[name]
+    """Look up a constituent by name (raises ``KeyError`` if unknown).
+
+    Resolves built-in catalog entries first, then any registered plugin pack
+    (see :mod:`tideglass.marea.plugins`).
+    """
+    if name in BY_NAME:
+        return BY_NAME[name]
+    from tideglass.marea import plugins
+
+    return plugins.find(name)  # raises KeyError if unknown to plugins too
 
 
 def principal() -> list[Constituent]:

@@ -24,7 +24,8 @@ assimilates a fresh feed into the deployed model (with drift check and
 optional auto-refit); ``poll`` repeats that live against NOAA on a sleep loop;
 ``pool`` fits a short record by borrowing strength from the network;
 ``extremes`` prints skew-surge stats, GPD return levels, and joint
-tide/surge exceedance.
+tide/surge exceedance; ``plugins`` lists constituent packs; ``report``
+renders the one-page global validation report.
 """
 
 from __future__ import annotations
@@ -93,6 +94,7 @@ def cmd_fit(args) -> int:
             alpha=args.alpha,
             station=station,
             source=source,
+            kernel=args.kernel,
         )
     except ValueError as exc:
         print(f"tideglass fit: {exc}", file=sys.stderr)
@@ -603,6 +605,37 @@ def cmd_validate(args) -> int:
     return 0
 
 
+def cmd_report(args) -> int:
+    from tideglass.marea.report import build_report
+
+    md = build_report(args.data_dir)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(md)
+        print(f"report written: {args.out}")
+        return 0
+    print(md, end="")
+    return 0
+
+
+def cmd_plugins(args) -> int:
+    from tideglass.marea.plugins import all_constituents, list_packs
+
+    packs = list_packs()
+    total = sum(len(v) for v in packs.values())
+    print(f"constituent packs: {len(packs)} ({total} plugin constituents)")
+    for name in sorted(packs):
+        print(f"  {name}: {', '.join(packs[name])}")
+    if args.speeds:
+        from tideglass.marea.constituents import speed
+
+        print()
+        print(f"{'constituent':<14}{'speed(d/h)':>12}{'species':>12}")
+        for c in all_constituents():
+            print(f"{c.name:<14}{speed(c):>12.5f}{c.species:>12}")
+    return 0
+
+
 def cmd_alert(args) -> int:
     try:
         times, heights = read_csv(args.csv)
@@ -748,6 +781,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_fit.add_argument("--no-select", action="store_true", help="fit principal 8 directly")
     p_fit.add_argument("--source", default=None,
                        help="provenance tag pinned in the artifact (default: csv:<path>)")
+    p_fit.add_argument("--kernel", choices=["numpy", "numba", "auto"], default="numpy",
+                       help="numeric backend for the design matrix (default: numpy)")
     p_fit.set_defaults(func=cmd_fit)
 
     p_pred = sub.add_parser("predict", help="height curve with 95%% bands")
@@ -934,6 +969,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_ext.add_argument("--flood", type=float, default=None,
                        help="alarm level (m) for the joint-exceedance table")
     p_ext.set_defaults(func=cmd_extremes)
+
+    p_rep = sub.add_parser(
+        "report", help="one-page global validation report (markdown)")
+    p_rep.add_argument("--data-dir", default="data",
+                       help="directory holding gauge CSV records")
+    p_rep.add_argument("--out", default=None,
+                       help="write markdown to a file (default: stdout)")
+    p_rep.set_defaults(func=cmd_report)
+
+    p_plug = sub.add_parser(
+        "plugins", help="list constituent packs (builtin + user JSON packs)")
+    p_plug.add_argument("--speeds", action="store_true",
+                        help="also print every constituent's derived speed")
+    p_plug.set_defaults(func=cmd_plugins)
     return ap
 
 

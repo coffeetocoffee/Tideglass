@@ -21,6 +21,13 @@ network effect — plus **global coastal coverage** from public harmonic databas
 (`harmonics_db`, benchmarked per region) and a published **validation write-up**
 (`VALIDATION.md`) with bench tables vs `pytides` and `UTide`.
 
+v0.9 locks in the ecosystem: an **optional fused Numba kernel** (numerically
+identical to the numpy reference, which remains the default and the only hard
+dependency), a **frozen public API** (`api_version = "1.0"`, CI-enforced), and
+**plugin constituent packs** (rivers, Great Lakes, solid-earth — load your own
+JSON packs). And the proof: `GLOBAL_VALIDATION.md`, the one-page report every
+region, every source has to answer to (`tideglass report`).
+
 ## Install
 
 ```bash
@@ -134,6 +141,19 @@ lo, hi, q = conformalize(pred.mean, sig, cal.mean, cal_sig, cal_y)
 print(TideAdvisor(model).advise(
     future_times, flood_threshold_m=2.5).summary)  # probabilistic threshold
 
+# v0.9: ecosystem lock-in — speed, plugin packs, frozen API, one-page proof
+from tideglass import (available_backends, register_pack, load_pack_dir,
+                       find, api_version, verify_public_api)
+fast = TideModel.fit(times, heights, kernel="numba")   # JIT kernel (opt-in;
+                                      # numpy remains the default & fallback)
+register_pack("my_coast", [Constituent("LOCAL1", (4, 0, 0, 0, 0, 0))])
+find("LOCAL1")                        # plugin constituents are first-class
+load_pack_dir("packs/")               # or drop JSON packs in a directory
+print(api_version)                    # "1.0" — the public API is frozen
+verify_public_api()                   # CI-enforced contract check
+# tideglass report → GLOBAL_VALIDATION.md: every region, every source,
+# one page (coverage + per-region tables + bench + GPD return levels)
+
 # v0.3: estimate tide + surge + secular trend jointly
 joint = JointModel.fit(times, heights)
 print(joint.fit_result.trend_mm_yr)            # e.g. +3.12 mm/yr ± 0.40
@@ -189,15 +209,23 @@ tideglass/
 │   ├── krige.py      # v0.7: ordinary-kriging / GP spatial harmonics + variance
 │   ├── transfer.py   # v0.7: response-function transfer from reference ports
 │   ├── bench_global.py # v0.7: benchmark vs TPXO/FES-style global grids
-│   └── tpxo.py       # v0.7.1: genuine TPXO/FES NetCDF3 ingestion + self-check
+│   ├── tpxo.py       # v0.7.1: genuine TPXO/FES NetCDF3 ingestion + self-check
+│   ├── pooling.py    # v0.8: hierarchical partial pooling across the network
+│   ├── extremes.py   # v0.8: skew-surge + GPD return levels + joint exceedance
+│   ├── kernel.py     # v0.9: optional fused Numba kernel (numpy reference)
+│   ├── contract.py   # v0.9: frozen public API (PUBLIC_API + api_version)
+│   ├── plugins.py    # v0.9: plugin constituent packs (rivers/lakes/solid-earth)
+│   ├── report.py     # v0.9: one-page global validation report
 ├── marine/           # domain layer (consumes predict() only)
 │   ├── knowledge.py / species.py / harvesting.py / rip.py / advisor.py
 │   └── alerting.py   # v0.4: surge-event alerts for watched stations
 ├── web.py            # v0.4: stdlib HTTP API (GET /predict, /advise)
 ├── tui.py            # v0.4: terminal dashboard
 ├── cli.py            # fit / predict / bench / advise / smooth / calibrate /
-│                    #   export / serve / tui / alert / contribute / network /
-│                    #   validate / nowcast / poll (v0.6)
+│                     #   export / serve / tui / alert / contribute / network /
+│                     #   validate / nowcast / poll / pool / extremes (v0.8) /
+│                     #   report / plugins (v0.9)
+GLOBAL_VALIDATION.md  # v0.9: the one-page proof — regenerate: tideglass report
 data/                 # sample NOAA gauge CSVs (SF 9414290); grids/ has the
 │                     #   TPXO-style harmonic-grid stand-in (tpxo_sample.csv)
 ```

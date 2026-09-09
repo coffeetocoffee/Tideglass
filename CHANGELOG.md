@@ -15,6 +15,44 @@ All notable changes to Tideglass are documented here. The format is based on
   are replaced by `ValueError`/`OSError` messages carrying NOAA's own error
   text (e.g. "Range Limit Exceeded"), so failures are diagnosable at a glance.
 
+## [0.9.0]
+Milestone "Ecosystem lock-in" — the artifact competitors have to answer.
+
+### Added
+- `marea/kernel.py` — **optional accelerated numeric kernel** for the design
+  matrix (the engine's hot loop): a fused Numba JIT path (Julian date → mean
+  longitudes → Schureman node factors → design rows in one typed loop) that is
+  numerically identical to the numpy reference (max |Δ| ≈ 1e-15 over the full
+  catalog × 4,000 hours). Numba is never a hard dependency — the package still
+  installs numpy-only, `kernel="numpy"` remains the default everywhere, and
+  `"auto"`/`"numba"` fall back cleanly with a clear error when Numba is absent.
+  `TideModel.fit`/`predict` accept `kernel=`; `tideglass fit --kernel numba`.
+- **Public API freeze** (`marea/contract.py`) — `PUBLIC_API` pins the exact
+  `tideglass.__all__` surface; `verify_public_api()` fails loudly on any
+  accidental add/remove/rename (enforced by the test suite), and `api_version`
+  ("1.0") is the semver of the *contract* itself. `__version__` now exposed.
+- `marea/plugins.py` — **plugin constituent packs**: register extra
+  constituents beyond the built-in catalog (seed packs `rivers`,
+  `great_lakes`, `solid_earth`; 14 composition-exact compound constituents —
+  e.g. 2M2 = 2×M2's Doodson, so derived speeds are physically correct).
+  `register_pack` / `register_constituent`, JSON pack files (`load_pack_file`,
+  `load_pack_dir`), `find` / `all_constituents`; `constituents.get` resolves
+  plugin names, so packs are first-class fit candidates. `tideglass plugins`.
+- `marea/report.py` + `tideglass report` — **the one-page global validation
+  report**: coverage and per-region self-consistency from the published
+  harmonics DB, hold-out bench + skew-surge GPD return levels for every gauge
+  record under `data/`, and the engine inventory (backends, packs, API
+  contract) in a single deterministic markdown page — `GLOBAL_VALIDATION.md`
+  is committed and reproducible offline.
+
+### Changed
+- `pyproject.toml` version → 0.9.0; `tideglass.__version__` added.
+- Top-level exports: kernel (`available_backends`, `basis_matrix`), plugin
+  (`register_pack`, `register_constituent`, `load_pack_file`, `load_pack_dir`,
+  `list_packs`, `find`, `all_constituents`), contract (`api_version`,
+  `verify_public_api`), constituents (`CATALOG`, `Constituent`, `get`,
+  `speed`, `principal`), harmonics (`list_regions`, `stations_in_region`).
+
 ## [0.8.0]
 Milestone "Uncertainty as the product" — released.
 

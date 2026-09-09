@@ -6,6 +6,8 @@ surface adds export feeds, a stdlib HTTP API, and a terminal dashboard.
 """
 
 from tideglass import marea, marine
+
+__version__ = "0.9.0"
 from tideglass.marea.bench_global import compare, global_model_at, read_harmonic_grid
 from tideglass.marea.calibration import (
     conformal_quantile,
@@ -17,6 +19,14 @@ from tideglass.marea.calibration import (
     pit_values,
     reliability_curve,
 )
+from tideglass.marea.constituents import (
+    CATALOG,
+    Constituent,
+    get,
+    principal,
+    speed,
+)
+from tideglass.marea.contract import api_version, verify_public_api
 from tideglass.marea.crowdsource import GaugeStore
 from tideglass.marea.drift import HealthMonitor, HealthReport
 from tideglass.marea.export import (
@@ -42,13 +52,25 @@ from tideglass.marea.harmonics_db import (
     add_harmonic_file,
     benchmark_region,
     coverage_report,
+    list_regions,
     load_station,
+    stations_in_region,
 )
 from tideglass.marea.kalman import JointModel
+from tideglass.marea.kernel import available_backends, basis_matrix
 from tideglass.marea.krige import KrigeField, krige_field, krige_regional
 from tideglass.marea.model import Prediction, TideModel
 from tideglass.marea.nowcast import NowcastEngine, UpdateLog
 from tideglass.marea.ops import OpsReport, cold_start, poll, rerun
+from tideglass.marea.plugins import (
+    all_constituents,
+    find,
+    list_packs,
+    load_pack_dir,
+    load_pack_file,
+    register_constituent,
+    register_pack,
+)
 from tideglass.marea.pooling import HierarchicalPool, PooledConstituent
 from tideglass.marea.tpxo import (
     format_self_check,
@@ -64,8 +86,10 @@ from tideglass.tui import build_dashboard
 from tideglass.web import run_server
 
 __all__ = [
+    "CATALOG",
     "GPD",
     "Advice",
+    "Constituent",
     "GaugeStore",
     "HealthMonitor",
     "HealthReport",
@@ -84,7 +108,11 @@ __all__ = [
     "TransferCoefficients",
     "UpdateLog",
     "add_harmonic_file",
+    "all_constituents",
     "annual_rate",
+    "api_version",
+    "available_backends",
+    "basis_matrix",
     "benchmark_region",
     "build_dashboard",
     "cold_start",
@@ -96,13 +124,19 @@ __all__ = [
     "crps_gaussian",
     "decluster",
     "evaluate_calibration",
+    "find",
     "fit_gpd",
     "flood_probability",
     "format_self_check",
+    "get",
     "global_model_at",
     "joint_exceedance_probability",
     "krige_field",
     "krige_regional",
+    "list_packs",
+    "list_regions",
+    "load_pack_dir",
+    "load_pack_file",
     "load_station",
     "marea",
     "marine",
@@ -110,18 +144,24 @@ __all__ = [
     "pit_histogram",
     "pit_values",
     "poll",
+    "principal",
     "read_harmonic_grid",
     "read_netcdf",
     "read_tpxo",
+    "register_constituent",
+    "register_pack",
     "reliability_curve",
     "rerun",
     "run_server",
     "self_check_tpxo",
     "skew_surge",
+    "speed",
+    "stations_in_region",
     "surge_events",
     "to_json",
     "to_xtide",
     "tpxo_model_at",
+    "verify_public_api",
     "write_csv",
     "write_json",
     "write_netcdf",
