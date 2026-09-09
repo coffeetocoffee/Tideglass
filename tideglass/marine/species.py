@@ -6,9 +6,9 @@ Given a predicted tide curve, report when each species' zone is exposed
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Dict, List, Sequence, Tuple
+from datetime import datetime
 
 
 @dataclass(frozen=True)
@@ -20,7 +20,7 @@ class Species:
     note: str
 
 
-SPECIES: List[Species] = [
+SPECIES: list[Species] = [
     Species("Pacific oyster", "bivalve", "mid", 0.4,
             "Filter-feeds when submerged; accessible on low-water exposure."),
     Species("Blue mussel", "bivalve", "mid", 0.5,
@@ -33,7 +33,7 @@ SPECIES: List[Species] = [
             "Extreme low tides expose the fringe for survey."),
 ]
 
-BY_NAME: Dict[str, Species] = {s.name: s for s in SPECIES}
+BY_NAME: dict[str, Species] = {s.name: s for s in SPECIES}
 
 
 def get(name: str) -> Species:
@@ -45,7 +45,7 @@ def exposure_windows(
     heights,
     threshold_m: float,
     min_hours: float = 1.0,
-) -> List[Tuple[datetime, datetime]]:
+) -> list[tuple[datetime, datetime]]:
     """Contiguous runs with height below threshold, at least ``min_hours``."""
     import numpy as np
 
@@ -56,7 +56,7 @@ def exposure_windows(
     dts = np.diff(np.array([t.timestamp() for t in times])) / 3600.0
     dt = float(np.median(dts)) if dts.size else 1.0
     below = h < threshold_m
-    windows: List[Tuple[datetime, datetime]] = []
+    windows: list[tuple[datetime, datetime]] = []
     start = None
     for i, b in enumerate(below):
         if b and start is None:

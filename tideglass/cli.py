@@ -4,9 +4,11 @@
     tideglass predict <station> <date> [--store DIR] [--days N]
     tideglass bench <csv> [--test-fraction F] [--against pytides|none]
     tideglass advise <station> <date> [--store DIR] [--days N]
+    tideglass fetch <station> <begin> <end> [--out CSV] [--datum D] [--interval I]
 
 ``fit`` reads ``time,height`` rows (ISO-8601 datetimes, metres) and saves a
-model artifact; ``predict`` prints an hourly height curve with 95% bands.
+model artifact; ``predict`` prints an hourly height curve with 95% bands;
+``fetch`` downloads a gauge CSV directly from NOAA CO-OPS.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
-from tideglass.marea.metrics import ci_coverage, evaluate, peak_tide_error, rmse
+from tideglass.marea.metrics import evaluate, peak_tide_error, rmse
 from tideglass.marea.model import TideModel
 
 DEFAULT_STORE = ".tideglass"
@@ -142,7 +144,7 @@ def _load_pytides():
 
 
 def _fmt(x: float) -> str:
-    if x != x:  # nan
+    if x != x:  # noqa: PLR0124 - the standard NaN check idiom
         return "n/a"
     return f"{x:.4f}"
 
@@ -158,7 +160,7 @@ def cmd_bench(args) -> int:
     order = sorted(range(len(times)), key=lambda i: times[i])
     times = [times[i] for i in order]
     y = np.array([heights[i] for i in order], dtype=float)
-    n_test = max(24, int(round(len(times) * args.test_fraction)))
+    n_test = max(24, round(len(times) * args.test_fraction))
     train_t, train_y = times[:-n_test], y[:-n_test]
     test_t, test_y = times[-n_test:], y[-n_test:]
     station = args.station or os.path.splitext(os.path.basename(args.csv))[0]
@@ -179,7 +181,7 @@ def cmd_bench(args) -> int:
                 "rmse": rmse(py_mean, test_y),
                 "peak_error": peak_tide_error(py_mean, test_y),
             }
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - degrade to Marea-only metrics
             print(f"# pytides comparison skipped: {exc}")
 
     print(f"station: {station}  train: {len(train_t)}  test: {len(test_t)}")
@@ -224,6 +226,25 @@ def cmd_advise(args) -> int:
     return 0
 
 
+def cmd_fetch(args) -> int:
+    from tideglass.fetch import fetch_noaa, write_csv
+
+    out = args.out or f"{args.station}.csv"
+    try:
+        rows = fetch_noaa(args.station, args.begin, args.end,
+                          datum=args.datum, interval=args.interval)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass fetch: {exc}", file=sys.stderr)
+        return 2
+    if not rows:
+        print(f"tideglass fetch: no data for station {args.station!r}", file=sys.stderr)
+        return 2
+    write_csv(rows, out)
+    print(f"station: {args.station}  rows: {len(rows)}  datum: {args.datum}")
+    print(f"saved: {out}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="tideglass", description="Tide intelligence engine")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -259,6 +280,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_adv.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
     p_adv.add_argument("--days", type=int, default=1, help="days from midnight")
     p_adv.set_defaults(func=cmd_advise)
+
+    p_fetch = sub.add_parser("fetch", help="download NOAA CO-OPS gauge CSV")
+    p_fetch.add_argument("station", help="NOAA station id (e.g. 9414290)")
+    p_fetch.add_argument("begin", help="start date YYYY-MM-DD (UTC)")
+    p_fetch.add_argument("end", help="end date YYYY-MM-DD (UTC)")
+    p_fetch.add_argument("--out", default=None, help="output CSV (default: <station>.csv)")
+    p_fetch.add_argument("--datum", default="MLLW", help="NOAA vertical datum")
+    p_fetch.add_argument("--interval", default="h", choices=["h", "1", "hilo"],
+                         help="passed to NOAA (observed water levels are 6-min)")
+    p_fetch.set_defaults(func=cmd_fetch)
     return ap
 
 

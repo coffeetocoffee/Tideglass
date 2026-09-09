@@ -9,9 +9,9 @@ tide is one ingredient, and the score says so in ``basis``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Sequence
 
 import numpy as np
 
@@ -20,14 +20,14 @@ from tideglass.marine.knowledge import RIP_DEFAULTS
 
 @dataclass(frozen=True)
 class RiskCurve:
-    times: List[datetime]
+    times: list[datetime]
     score: np.ndarray  # 0..1
-    category: List[str]  # Low / Moderate / High
+    category: list[str]  # Low / Moderate / High
     basis: str = ("tidal rate-of-change × range heuristic "
                   "(waves + morphology not included)")
 
 
-def _categories(score: np.ndarray) -> List[str]:
+def _categories(score: np.ndarray) -> list[str]:
     return ["Low" if s < 0.33 else "Moderate" if s < 0.66 else "High"
             for s in score]
 

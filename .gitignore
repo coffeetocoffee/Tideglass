@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Testing / local state
+.pytest_cache/
+.tideglass/
+*.csv
+!data/*.csv
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

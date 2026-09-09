@@ -25,11 +25,10 @@ needs only ``numpy`` + stdlib.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import List, Sequence
 
 import numpy as np
-
 
 # --- F-distribution tail via the regularized incomplete beta function --------
 
@@ -104,11 +103,11 @@ class Candidate:
 
 @dataclass(frozen=True)
 class SelectionResult:
-    selected: List[str]  # names in selection order
-    excluded: List[str]  # names dropped by the Rayleigh gate (unresolvable)
-    rss: List[float]  # residual sum of squares after each accepted addition
-    f_stats: List[float]  # F statistic of each accepted addition
-    p_values: List[float]
+    selected: list[str]  # names in selection order
+    excluded: list[str]  # names dropped by the Rayleigh gate (unresolvable)
+    rss: list[float]  # residual sum of squares after each accepted addition
+    f_stats: list[float]  # F statistic of each accepted addition
+    p_values: list[float]
     n_obs: int
     n_params: int  # 1 + 2·len(selected)
 
@@ -175,9 +174,9 @@ def select(
     # complete enough cycles itself, so Ssa/Sa (periods of months) are
     # excluded from short records instead of aliasing storms into fake
     # long-period cycles.
-    excluded: List[str] = []
+    excluded: list[str] = []
     if min_separation_cycles > 0 and span > 0:
-        kept: List[Candidate] = []
+        kept: list[Candidate] = []
         for c in cands:
             own_cycles = abs(c.speed) * span / (2 * math.pi)
             if own_cycles < min_separation_cycles or any(
@@ -195,9 +194,9 @@ def select(
     r = y - Q @ proj
     rss = float(r @ r)
 
-    selected: List[str] = []
-    f_stats: List[float] = []
-    p_values: List[float] = []
+    selected: list[str] = []
+    f_stats: list[float] = []
+    p_values: list[float] = []
     rss_path = [rss]
 
     def absorb(name: str) -> None:

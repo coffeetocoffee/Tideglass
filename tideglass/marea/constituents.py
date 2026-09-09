@@ -17,7 +17,6 @@ multiples (M4 = 2×M2 → power 2, M6 = 3×M2 → power 3, …).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
 
 from tideglass.marea.astronomy import ARG_ORDER, RATES
 
@@ -25,7 +24,7 @@ from tideglass.marea.astronomy import ARG_ORDER, RATES
 @dataclass(frozen=True)
 class Constituent:
     name: str
-    doodson: Tuple[int, int, int, int, int, int]
+    doodson: tuple[int, int, int, int, int, int]
     phase0: float = 0.0
     species: str = "unknown"
     nodal: str = "unity"
@@ -38,7 +37,7 @@ def speed(c: Constituent) -> float:
     return sum(d * RATES[k] for d, k in zip(c.doodson, ARG_ORDER))
 
 
-CATALOG: List[Constituent] = [
+CATALOG: list[Constituent] = [
     # --- Principal 8 -------------------------------------------------------
     Constituent("M2", (2, 0, 0, 0, 0, 0), 0.0, "semidiurnal", "M2"),
     Constituent("S2", (2, 2, -2, 0, 0, 0), 0.0, "semidiurnal", "unity"),
@@ -61,7 +60,7 @@ CATALOG: List[Constituent] = [
     Constituent("Sa", (0, 0, 1, 0, 0, 0), 0.0, "long", "unity"),
 ]
 
-BY_NAME: Dict[str, Constituent] = {c.name: c for c in CATALOG}
+BY_NAME: dict[str, Constituent] = {c.name: c for c in CATALOG}
 
 PRINCIPAL_8 = ["M2", "S2", "N2", "K2", "K1", "O1", "P1", "Q1"]
 
@@ -71,6 +70,6 @@ def get(name: str) -> Constituent:
     return BY_NAME[name]
 
 
-def principal() -> List[Constituent]:
+def principal() -> list[Constituent]:
     """The 8 principal constituents."""
     return [BY_NAME[n] for n in PRINCIPAL_8]

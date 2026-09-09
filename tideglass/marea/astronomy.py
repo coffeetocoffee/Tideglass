@@ -25,8 +25,10 @@ Conventions
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Dict, Tuple
+
+import numpy as np
 
 D2R = math.pi / 180.0
 R2D = 180.0 / math.pi
@@ -43,7 +45,7 @@ def _s2d(degrees: float, arcmins: float = 0.0, arcsecs: float = 0.0) -> float:
     return degrees + arcmins / 60.0 + arcsecs / 3600.0
 
 
-def _poly(coeffs: Tuple[float, ...], x: float) -> float:
+def _poly(coeffs: tuple[float, ...], x: float) -> float:
     return sum(c * x**i for i, c in enumerate(coeffs))
 
 
@@ -95,7 +97,7 @@ _OBL_COEFFS = tuple(
 _LUNAR_INCLINATION = 5.145  # degrees; essentially constant (JPL Horizons)
 
 
-def _mean_rate(coeffs: Tuple[float, ...]) -> float:
+def _mean_rate(coeffs: tuple[float, ...]) -> float:
     """Mean hourly rate (°/h) = leading polynomial term × centuries/hour."""
     return coeffs[1] * _CENTURIES_PER_HOUR
 
@@ -109,7 +111,7 @@ _PP_RATE = _mean_rate(_PP_COEFFS)
 # Sun–Moon longitude drift: tau = T + h − s.
 _TAU_RATE = 15.0 + _H_RATE - _S_RATE
 
-RATES: Dict[str, float] = {
+RATES: dict[str, float] = {
     "tau": _TAU_RATE,  # == 15.0 + ε with ε = rate(h) − rate(s) ≈ −0.5079
     "s": _S_RATE,
     "h": _H_RATE,
@@ -160,51 +162,74 @@ def _centuries(t: datetime) -> float:
 # --- Schureman auxiliary angles (functions of N, i, omega) -------------------
 
 
-def _inclination(N: float, i: float, omega: float) -> float:
-    """Mean inclination of the lunar orbit (Schureman Table 6, ``I``)."""
+def _inclination(N, i, omega):
+    """Mean inclination of the lunar orbit (Schureman Table 6, ``I``).
+
+    Array-safe: accepts scalars or numpy arrays for ``N``/``omega``.
+    """
     n, ii, o = D2R * N, D2R * i, D2R * omega
-    return R2D * math.acos(
-        max(-1.0, min(1.0, math.cos(ii) * math.cos(o) - math.sin(ii) * math.sin(o) * math.cos(n)))
-    )
+    arg = np.cos(ii) * np.cos(o) - np.sin(ii) * np.sin(o) * np.cos(n)
+    return R2D * np.arccos(np.clip(arg, -1.0, 1.0))
 
 
-def _xi(N: float, i: float, omega: float) -> float:
+def _xi(N, i, omega):
     n, ii, o = D2R * N, D2R * i, D2R * omega
-    e1 = math.atan(math.cos(0.5 * (o - ii)) / math.cos(0.5 * (o + ii)) * math.tan(0.5 * n)) - 0.5 * n
-    e2 = math.atan(math.sin(0.5 * (o - ii)) / math.sin(0.5 * (o + ii)) * math.tan(0.5 * n)) - 0.5 * n
+    e1 = np.arctan(np.cos(0.5 * (o - ii)) / np.cos(0.5 * (o + ii)) * np.tan(0.5 * n)) - 0.5 * n
+    e2 = np.arctan(np.sin(0.5 * (o - ii)) / np.sin(0.5 * (o + ii)) * np.tan(0.5 * n)) - 0.5 * n
     return -(e1 + e2) * R2D
 
 
-def _nu(N: float, i: float, omega: float) -> float:
+def _nu(N, i, omega):
     n, ii, o = D2R * N, D2R * i, D2R * omega
-    e1 = math.atan(math.cos(0.5 * (o - ii)) / math.cos(0.5 * (o + ii)) * math.tan(0.5 * n)) - 0.5 * n
-    e2 = math.atan(math.sin(0.5 * (o - ii)) / math.sin(0.5 * (o + ii)) * math.tan(0.5 * n)) - 0.5 * n
+    e1 = np.arctan(np.cos(0.5 * (o - ii)) / np.cos(0.5 * (o + ii)) * np.tan(0.5 * n)) - 0.5 * n
+    e2 = np.arctan(np.sin(0.5 * (o - ii)) / np.sin(0.5 * (o + ii)) * np.tan(0.5 * n)) - 0.5 * n
     return (e1 - e2) * R2D
 
 
-def _nup(N: float, i: float, omega: float) -> float:
-    """Schureman eq. 224 (K1 phase correction argument)."""
+def _nup(N, i, omega):
+    """Schureman eq. 224 (K1 phase correction argument). Array-safe."""
     inc = D2R * _inclination(N, i, omega)
     nu = D2R * _nu(N, i, omega)
-    return R2D * math.atan2(
-        math.sin(2 * inc) * math.sin(nu),
-        math.sin(2 * inc) * math.cos(nu) + 0.3347,
+    return R2D * np.arctan2(
+        np.sin(2 * inc) * np.sin(nu),
+        np.sin(2 * inc) * np.cos(nu) + 0.3347,
     )
 
 
-def _nupp(N: float, i: float, omega: float) -> float:
-    """Schureman eq. 232 (K2 phase correction argument)."""
+def _nupp(N, i, omega):
+    """Schureman eq. 232 (K2 phase correction argument). Array-safe."""
     inc = D2R * _inclination(N, i, omega)
     nu = D2R * _nu(N, i, omega)
-    return R2D * 0.5 * math.atan2(
-        math.sin(inc) ** 2 * math.sin(2 * nu),
-        math.sin(inc) ** 2 * math.cos(2 * nu) + 0.0727,
+    return R2D * 0.5 * np.arctan2(
+        np.sin(inc) ** 2 * np.sin(2 * nu),
+        np.sin(inc) ** 2 * np.cos(2 * nu) + 0.0727,
     )
 
 
-def _astro_state(t: datetime) -> Dict[str, float]:
-    """Full astronomical state at time ``t`` (all values in degrees)."""
-    T = _centuries(t)
+def _astro_state_array(times: Sequence[datetime]) -> dict[str, np.ndarray]:
+    """Full astronomical state for many times at once (arrays, degrees).
+
+    Vectorized over ``times`` so the design matrix can be built without a
+    per-(constituent, time) Python loop. ``_astro_state`` (single time) is a
+    scalar view over this same code path.
+    """
+    Y = np.array([t.year for t in times], dtype=float)
+    Mo = np.array([t.month for t in times], dtype=float)
+    D = np.array([
+        t.day + t.hour / 24.0 + t.minute / 1440.0 + t.second / 86400.0
+        + t.microsecond / 86400.0e6 for t in times
+    ])
+    Mo2 = np.where(Mo <= 2, Mo + 12.0, Mo)
+    Y2 = np.where(Mo <= 2, Y - 1.0, Y)
+    a = np.floor(Y2 / 100.0)
+    b = 2.0 - a + np.floor(a / 4.0)
+    jd = (
+        np.floor(365.25 * (Y2 + 4716.0))
+        + np.floor(30.6001 * (Mo2 + 1.0))
+        + D + b - 1524.5
+    )
+    T = (jd - _J2000_JD) / 36525.0
+
     s = _poly(_S_COEFFS, T) % 360.0
     h = _poly(_H_COEFFS, T) % 360.0
     p = _poly(_P_COEFFS, T) % 360.0
@@ -217,9 +242,7 @@ def _astro_state(t: datetime) -> Dict[str, float]:
     nu = _nu(N, i, omega) % 360.0
     nup = _nup(N, i, omega) % 360.0
     nupp = _nupp(N, i, omega) % 360.0
-    P = (p - xi) % 360.0
-    jd = julian_day(t)
-    hour_angle = (jd - math.floor(jd)) * 360.0  # mean solar time angle
+    hour_angle = (jd - np.floor(jd)) * 360.0
     tau = (hour_angle + h - s) % 360.0
     return {
         "tau": tau,
@@ -235,20 +258,25 @@ def _astro_state(t: datetime) -> Dict[str, float]:
         "nu": nu,
         "nup": nup,
         "nupp": nupp,
-        "P": P,
     }
+
+
+def _astro_state(t: datetime) -> dict[str, float]:
+    """Full astronomical state at time ``t`` (all values in degrees)."""
+    st = _astro_state_array([t])
+    return {k: float(v[0]) if np.ndim(v) else float(v) for k, v in st.items()}
 
 
 # --- Public kernel API ---------------------------------------------------------
 
 
-def mean_longitudes(t: datetime) -> Dict[str, float]:
+def mean_longitudes(t: datetime) -> dict[str, float]:
     """Mean longitudes ``s, h, p, N, p1`` (degrees) from epoch J2000."""
     st = _astro_state(t)
     return {"s": st["s"], "h": st["h"], "p": st["p"], "N": st["N"], "p1": st["pp"]}
 
 
-def doodson_args(t: datetime) -> Tuple[float, ...]:
+def doodson_args(t: datetime) -> tuple[float, ...]:
     """The six Doodson arguments ``(tau, s, h, p, Np, p1)`` in degrees."""
     st = _astro_state(t)
     return (st["tau"], st["s"], st["h"], st["p"], st["N"], st["pp"])
@@ -257,73 +285,73 @@ def doodson_args(t: datetime) -> Tuple[float, ...]:
 # --- Nodal corrections (Schureman) --------------------------------------------
 
 
-def _f_unity(a: Dict[str, float]) -> float:
+def _f_unity(a: dict) -> float:
     return 1.0
 
 
-def _f_Mm(a: Dict[str, float]) -> float:
+def _f_Mm(a: dict) -> float:
     o, i, I = D2R * a["omega"], D2R * a["i"], D2R * a["I"]
-    mean = (2 / 3.0 - math.sin(o) ** 2) * (1 - 1.5 * math.sin(i) ** 2)
-    return (2 / 3.0 - math.sin(I) ** 2) / mean
+    mean = (2 / 3.0 - np.sin(o) ** 2) * (1 - 1.5 * np.sin(i) ** 2)
+    return (2 / 3.0 - np.sin(I) ** 2) / mean
 
 
-def _f_Mf(a: Dict[str, float]) -> float:
+def _f_Mf(a: dict) -> float:
     o, i, I = D2R * a["omega"], D2R * a["i"], D2R * a["I"]
-    mean = math.sin(o) ** 2 * math.cos(0.5 * i) ** 4
-    return math.sin(I) ** 2 / mean
+    mean = np.sin(o) ** 2 * np.cos(0.5 * i) ** 4
+    return np.sin(I) ** 2 / mean
 
 
-def _f_O1(a: Dict[str, float]) -> float:
+def _f_O1(a: dict) -> float:
     o, i, I = D2R * a["omega"], D2R * a["i"], D2R * a["I"]
-    mean = math.sin(o) * math.cos(0.5 * o) ** 2 * math.cos(0.5 * i) ** 4
-    return (math.sin(I) * math.cos(0.5 * I) ** 2) / mean
+    mean = np.sin(o) * np.cos(0.5 * o) ** 2 * np.cos(0.5 * i) ** 4
+    return (np.sin(I) * np.cos(0.5 * I) ** 2) / mean
 
 
-def _f_M2(a: Dict[str, float]) -> float:
+def _f_M2(a: dict) -> float:
     o, i, I = D2R * a["omega"], D2R * a["i"], D2R * a["I"]
-    mean = math.cos(0.5 * o) ** 4 * math.cos(0.5 * i) ** 4
-    return math.cos(0.5 * I) ** 4 / mean
+    mean = np.cos(0.5 * o) ** 4 * np.cos(0.5 * i) ** 4
+    return np.cos(0.5 * I) ** 4 / mean
 
 
-def _f_K1(a: Dict[str, float]) -> float:
+def _f_K1(a: dict) -> float:
     o, i, I = D2R * a["omega"], D2R * a["i"], D2R * a["I"]
     nu = D2R * a["nu"]
-    mean = 0.5023 * math.sin(2 * o) * (1 - 1.5 * math.sin(i) ** 2) + 0.1681
-    return math.sqrt(
-        0.2523 * math.sin(2 * I) ** 2 + 0.1689 * math.sin(2 * I) * math.cos(nu) + 0.0283
+    mean = 0.5023 * np.sin(2 * o) * (1 - 1.5 * np.sin(i) ** 2) + 0.1681
+    return np.sqrt(
+        0.2523 * np.sin(2 * I) ** 2 + 0.1689 * np.sin(2 * I) * np.cos(nu) + 0.0283
     ) / mean
 
 
-def _f_K2(a: Dict[str, float]) -> float:
+def _f_K2(a: dict) -> float:
     o, i, I = D2R * a["omega"], D2R * a["i"], D2R * a["I"]
     nu = D2R * a["nu"]
-    mean = 0.5023 * math.sin(o) ** 2 * (1 - 1.5 * math.sin(i) ** 2) + 0.0365
-    return math.sqrt(
-        0.2523 * math.sin(I) ** 4 + 0.0367 * math.sin(I) ** 2 * math.cos(2 * nu) + 0.0013
+    mean = 0.5023 * np.sin(o) ** 2 * (1 - 1.5 * np.sin(i) ** 2) + 0.0365
+    return np.sqrt(
+        0.2523 * np.sin(I) ** 4 + 0.0367 * np.sin(I) ** 2 * np.cos(2 * nu) + 0.0013
     ) / mean
 
 
-def _u_zero(a: Dict[str, float]) -> float:
+def _u_zero(a: dict[str, float]) -> float:
     return 0.0
 
 
-def _u_Mf(a: Dict[str, float]) -> float:
+def _u_Mf(a: dict[str, float]) -> float:
     return -2.0 * a["xi"]
 
 
-def _u_O1(a: Dict[str, float]) -> float:
+def _u_O1(a: dict[str, float]) -> float:
     return 2.0 * a["xi"] - a["nu"]
 
 
-def _u_M2(a: Dict[str, float]) -> float:
+def _u_M2(a: dict[str, float]) -> float:
     return 2.0 * a["xi"] - 2.0 * a["nu"]
 
 
-def _u_K1(a: Dict[str, float]) -> float:
+def _u_K1(a: dict[str, float]) -> float:
     return -a["nup"]
 
 
-def _u_K2(a: Dict[str, float]) -> float:
+def _u_K2(a: dict[str, float]) -> float:
     return -2.0 * a["nupp"]
 
 
@@ -352,7 +380,7 @@ def _wrap_deg(x: float) -> float:
     return (x + 180.0) % 360.0 - 180.0
 
 
-def nodal_factor(constituent, t: datetime) -> Tuple[float, float]:
+def nodal_factor(constituent, t: datetime) -> tuple[float, float]:
     """Node factor ``f`` and equilibrium correction ``u`` (degrees).
 
     ``constituent`` is a :class:`tideglass.marea.constituents.Constituent`;
@@ -363,3 +391,11 @@ def nodal_factor(constituent, t: datetime) -> Tuple[float, float]:
     f = _F_DISPATCH[constituent.nodal](a) ** constituent.f_power
     u = _U_DISPATCH[constituent.nodal](a) * constituent.u_power
     return (f, _wrap_deg(u))
+
+
+def nodal_factor_array(constituent, state: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized :func:`nodal_factor` over a state produced by
+    :func:`_astro_state_array` (arrays of ``f`` and ``u`` in degrees)."""
+    f = _F_DISPATCH[constituent.nodal](state) ** constituent.f_power
+    u = _U_DISPATCH[constituent.nodal](state) * constituent.u_power
+    return f, _wrap_deg(u)

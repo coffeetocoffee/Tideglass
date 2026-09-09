@@ -17,7 +17,6 @@ All functions compare predicted series against reference gauge observations:
 from __future__ import annotations
 
 import math
-from typing import Dict
 
 import numpy as np
 
@@ -64,7 +63,7 @@ def peak_tide_error(predicted, observed) -> float:
     return float(np.mean(np.abs(p[idx] - o[idx])))
 
 
-def evaluate(prediction, observed) -> Dict[str, float]:
+def evaluate(prediction, observed) -> dict[str, float]:
     """Score a :class:`~tideglass.marea.model.Prediction` vs observations."""
     o = _asarray(observed)
     return {

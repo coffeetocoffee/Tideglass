@@ -7,9 +7,9 @@ never reaches into signal math.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Sequence
 
 from tideglass.marea.model import Prediction, TideModel
 from tideglass.marine import harvesting as HV
@@ -20,11 +20,11 @@ from tideglass.marine import species as SP
 @dataclass(frozen=True)
 class Advice:
     station: str | None
-    times: List[datetime]
+    times: list[datetime]
     prediction: Prediction
     rip: RIP.RiskCurve
-    harvest: List[HV.HarvestWindow]
-    exposure: Dict[str, float]  # species name -> exposed fraction
+    harvest: list[HV.HarvestWindow]
+    exposure: dict[str, float]  # species name -> exposed fraction
     summary: str
 
 
@@ -46,10 +46,12 @@ class TideAdvisor:
                     for s in self.species}
         peak = int(rip.score.argmax())
         lines = [
-            f"station {self.model.station}: "
-            f"{len(harvest)} safe harvest window(s), "
-            f"peak rip risk {rip.category[peak]} ({rip.score[peak]:.2f}) "
-            f"at {rip.times[peak].isoformat()}",
+            (
+                f"station {self.model.station}: "
+                f"{len(harvest)} safe harvest window(s), "
+                f"peak rip risk {rip.category[peak]} ({rip.score[peak]:.2f}) "
+                f"at {rip.times[peak].isoformat()}"
+            )
         ]
         for w in harvest:
             lines.append(f"  harvest {w.start.isoformat()} → {w.end.isoformat()} ({w.reason})")

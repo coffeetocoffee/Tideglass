@@ -7,9 +7,9 @@ clean surge guard: no flagged residual/surge event in the preceding
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Sequence
 
 from tideglass.marine.knowledge import HARVEST_DEFAULTS
 from tideglass.marine.species import exposure_windows
@@ -29,14 +29,14 @@ def safe_windows(
     low_threshold_m: float = HARVEST_DEFAULTS["low_threshold_m"],
     min_hours: float = HARVEST_DEFAULTS["min_hours"],
     surge_guard_hours: float = HARVEST_DEFAULTS["surge_guard_hours"],
-) -> List[HarvestWindow]:
+) -> list[HarvestWindow]:
     """Low-water work windows that pass the surge guard."""
     times = list(times)
     wins = exposure_windows(times, heights, low_threshold_m, min_hours)
     flags = list(surge_flags) if surge_flags is not None else [False] * len(times)
     if len(flags) != len(times):
         raise ValueError("surge_flags must match times")
-    out: List[HarvestWindow] = []
+    out: list[HarvestWindow] = []
     for start, end in wins:
         guard_from = start - timedelta(hours=surge_guard_hours)
         recent_surge = any(

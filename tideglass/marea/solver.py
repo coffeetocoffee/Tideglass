@@ -28,8 +28,8 @@ so it stays independently testable.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import List, Sequence
 
 import numpy as np
 
@@ -56,7 +56,7 @@ class TermFit:
 class Solution:
     mean: float  # H0, the time-mean level
     se_mean: float
-    terms: List[TermFit]
+    terms: list[TermFit]
     coef: np.ndarray  # full solution vector [H0, a1, b1, …]
     covariance: np.ndarray  # C = σ²·(AᵀA)⁺
     sigma2: float  # residual variance estimate
@@ -121,7 +121,7 @@ def solve_matrix(A, y, names: Sequence[str] | None = None) -> Solution:
     AtA_pinv = (Vt.T / s**2) @ Vt
     C = sigma2 * AtA_pinv
 
-    terms: List[TermFit] = []
+    terms: list[TermFit] = []
     for j, name in enumerate(labels):
         ia, ib = 1 + 2 * j, 2 + 2 * j
         a, b = float(x[ia]), float(x[ib])

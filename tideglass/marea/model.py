@@ -28,14 +28,21 @@ from __future__ import annotations
 import json
 import math
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Sequence
 
 import numpy as np
 
 from tideglass.marea import constituents as CON
-from tideglass.marea.astronomy import D2R, doodson_args, julian_day, nodal_factor
+from tideglass.marea.astronomy import (
+    D2R,
+    _astro_state_array,
+    doodson_args,
+    julian_day,
+    nodal_factor,
+    nodal_factor_array,
+)
 from tideglass.marea.selection import Candidate, select
 from tideglass.marea.solver import rad_per_hour, solve_matrix
 
@@ -76,14 +83,23 @@ def _design_row(c: CON.Constituent, t: datetime) -> tuple:
 
 def _basis_matrix(constituents: Sequence[CON.Constituent],
                   times: Sequence[datetime]) -> np.ndarray:
+    times = list(times)
     n, m = len(times), len(constituents)
     A = np.empty((n, 1 + 2 * m))
     A[:, 0] = 1.0
-    for j, c in enumerate(constituents):
-        for i, t in enumerate(times):
-            co, si = _design_row(c, t)
-            A[i, 1 + 2 * j] = co
-            A[i, 2 + 2 * j] = si
+    if n and m:
+        # Vectorized over time: one (cheap) pass per constituent, the nodal
+        # kernel evaluated on arrays instead of a per-(c, t) Python loop.
+        state = _astro_state_array(times)
+        # Order matches doodson_args(): (tau, s, h, p, N, pp).
+        args = np.array([state[k] for k in ("tau", "s", "h", "p", "N", "pp")])
+        for j, c in enumerate(constituents):
+            dood = np.array(c.doodson, dtype=float)
+            V = (dood @ args + c.phase0) % 360.0
+            f, u = nodal_factor_array(c, state)
+            theta = (V + u) * D2R
+            A[:, 1 + 2 * j] = f * np.cos(theta)
+            A[:, 2 + 2 * j] = f * np.sin(theta)
     return A
 
 
@@ -96,10 +112,10 @@ class TideModel:
         coef: np.ndarray,
         covariance: np.ndarray,
         sigma2: float,
-        fits: List[Fit],
+        fits: list[Fit],
         station: str | None = None,
         source: str = "fit",
-        meta: Dict | None = None,
+        meta: dict | None = None,
     ):
         self._constituents = list(constituents)
         self._coef = np.asarray(coef, dtype=float)
@@ -121,7 +137,7 @@ class TideModel:
         candidates: Sequence[CON.Constituent] | None = None,
         alpha: float = 0.05,
         station: str | None = None,
-    ) -> "TideModel":
+    ) -> TideModel:
         """Fit a model from gauge observations.
 
         :param auto_select: run DCDM selection over ``candidates`` (default:
@@ -165,7 +181,7 @@ class TideModel:
         )
 
     @classmethod
-    def load_harmonic(cls, source, station: str | None = None) -> "TideModel":
+    def load_harmonic(cls, source, station: str | None = None) -> TideModel:
         """Load published harmonic constants (NOAA-style JSON).
 
         Accepts a mapping, a JSON string, or a path to a JSON file::
@@ -212,11 +228,11 @@ class TideModel:
         half = z * np.sqrt(var_mean + self._sigma2)
         return Prediction(mean=mean, lower=mean - half, upper=mean + half, se=se)
 
-    def constituents(self) -> List[Fit]:
+    def constituents(self) -> list[Fit]:
         """Fitted harmonic constants (name, amplitude, phase°, σ)."""
         return list(self._fits)
 
-    def to_artifact(self) -> Dict:
+    def to_artifact(self) -> dict:
         """JSON-serializable model artifact (round-trips via load_harmonic)."""
         return {
             "station": self.station,

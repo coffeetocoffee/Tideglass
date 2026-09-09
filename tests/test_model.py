@@ -139,3 +139,22 @@ def test_naive_datetimes_are_utc():
     m2 = TideModel.fit(naive, y, auto_select=False)
     p1, p2 = m1.predict(aware), m2.predict(naive)
     assert np.max(np.abs(p1.mean - p2.mean)) == 0.0
+
+
+def test_basis_matrix_matches_per_element():
+    from tideglass.marea.model import _basis_matrix, _design_row
+    from tideglass.marea import constituents as C
+
+    times = _hourly(T0, 73)
+    consts = C.principal()
+    A = _basis_matrix(consts, times)
+    n, m = len(times), len(consts)
+    assert A.shape == (n, 1 + 2 * m)
+    ref = np.empty_like(A)
+    ref[:, 0] = 1.0
+    for j, c in enumerate(consts):
+        for i, t in enumerate(times):
+            co, si = _design_row(c, t)
+            ref[i, 1 + 2 * j] = co
+            ref[i, 2 + 2 * j] = si
+    assert np.max(np.abs(A - ref)) < 1e-12

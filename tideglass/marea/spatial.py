@@ -16,23 +16,22 @@ total variance.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
 
 import numpy as np
 
 
 @dataclass(frozen=True)
 class EOFResult:
-    stations: List[str]
+    stations: list[str]
     modes: np.ndarray  # (n_modes × n_time) orthonormal temporal modes
     explained: np.ndarray  # variance fraction per kept mode
     total_explained: float
-    reconstructed: Dict[str, np.ndarray]
-    means: Dict[str, float]
+    reconstructed: dict[str, np.ndarray]
+    means: dict[str, float]
 
 
 def harmonize(
-    series: Dict[str, object],
+    series: dict[str, object],
     n_modes: int | None = None,
     variance_threshold: float = 0.95,
 ) -> EOFResult:
