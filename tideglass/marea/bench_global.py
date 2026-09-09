@@ -26,9 +26,8 @@ from typing import Any
 
 import numpy as np
 
-from tideglass.marea.model import TideModel
-from tideglass.marea import constituents as CON
 from tideglass.marea.metrics import evaluate
+from tideglass.marea.model import TideModel
 
 _GRID_KEY = tuple[float, float]
 

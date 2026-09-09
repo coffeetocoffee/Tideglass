@@ -46,8 +46,8 @@ class HealthReport:
     def __str__(self) -> str:
         flag = "REFIT" if self.needs_refit else "ok"
         lines = [
-            f"health[{flag}]: n={self.n} coverage={self.coverage:.3f}"
-            f" rmse={self.rmse:.4f} bias={self.bias:+.4f} m",
+            (f"health[{flag}]: n={self.n} coverage={self.coverage:.3f}"
+             f" rmse={self.rmse:.4f} bias={self.bias:+.4f} m"),
         ]
         if self.needs_refit:
             lines.append("  reasons:")

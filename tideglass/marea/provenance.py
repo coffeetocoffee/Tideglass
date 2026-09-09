@@ -43,7 +43,7 @@ def canonical_digest(times: Sequence[datetime], heights) -> str:
         return hashlib.sha256(b"<empty>").hexdigest()
     lines = [
         f"{(t.astimezone(timezone.utc) if t.tzinfo else t.replace(tzinfo=timezone.utc)).isoformat()};{h:.6f}"
-        .encode("utf-8")
+        .encode()
         for t, h in pairs
     ]
     return hashlib.sha256(b"\n".join(lines)).hexdigest()

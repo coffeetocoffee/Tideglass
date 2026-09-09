@@ -13,6 +13,7 @@ from tideglass.marea.calibration import (
     evaluate_calibration,
 )
 from tideglass.marea.crowdsource import GaugeStore
+from tideglass.marea.drift import HealthMonitor, HealthReport
 from tideglass.marea.export import (
     read_netcdf,
     to_json,
@@ -28,7 +29,6 @@ from tideglass.marea.harmonics_db import (
     coverage_report,
     load_station,
 )
-from tideglass.marea.drift import HealthMonitor, HealthReport
 from tideglass.marea.kalman import JointModel
 from tideglass.marea.krige import KrigeField, krige_field, krige_regional
 from tideglass.marea.model import Prediction, TideModel

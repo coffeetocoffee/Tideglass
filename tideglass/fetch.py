@@ -40,7 +40,9 @@ def _fmt_date(d: str) -> str:
 
 
 def _parse_api_date(d: str) -> date:
-    return datetime.strptime(d, "%Y%m%d").date()
+    # Result is a bare date (no wall-clock semantics), so the UTC pin is
+    # formal; it keeps naive-datetime lint (DTZ) satisfied.
+    return datetime.strptime(d, "%Y%m%d").replace(tzinfo=timezone.utc).date()
 
 
 def _noaa_error(exc: HTTPError) -> ValueError:

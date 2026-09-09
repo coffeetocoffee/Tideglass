@@ -23,7 +23,6 @@ are present, so it never breaks the single/dual-station cases.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import numpy as np

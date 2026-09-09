@@ -248,7 +248,7 @@ def cold_start(
     Dates are ``YYYY-MM-DD`` (UTC). Returns the fitted model; also seeds empty
     engine/health state so the first :func:`poll` continues from ``end``.
     """
-    get = fetcher or fetch_noaa
+    get = fetcher or fetch_noaa_range
     rows = get(station, begin, end, datum=datum)
     if not rows:
         raise ValueError(f"no data for station {station!r} in {begin}..{end}")

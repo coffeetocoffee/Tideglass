@@ -459,21 +459,22 @@ def self_check_tpxo(
     pub_f = {f.name: f for f in pub.constituents()}
     conv_f = {f.name: f for f in conv.constituents()}
     rows = []
-    for name in pub_f:
+    for name, pubc in pub_f.items():
         if name not in conv_f:
             rows.append({"constituent": name, "tpxo_amp": None,
-                         "pub_amp": pub_f[name].amplitude, "damp": None,
-                         "tpxo_phase": None, "pub_phase": pub_f[name].phase_deg,
+                         "pub_amp": pubc.amplitude, "damp": None,
+                         "tpxo_phase": None, "pub_phase": pubc.phase_deg,
                          "dphase": None, "ok": False, "note": "missing in TPXO"})
             continue
-        damp = abs(conv_f[name].amplitude - pub_f[name].amplitude)
-        dphase = (conv_f[name].phase_deg - pub_f[name].phase_deg + 180.0) % 360.0 - 180.0
+        convc = conv_f[name]
+        damp = abs(convc.amplitude - pubc.amplitude)
+        dphase = (convc.phase_deg - pubc.phase_deg + 180.0) % 360.0 - 180.0
         ok = damp <= tol_amp_m and abs(dphase) <= tol_phase_deg
         rows.append({"constituent": name,
-                     "tpxo_amp": conv_f[name].amplitude,
-                     "pub_amp": pub_f[name].amplitude, "damp": damp,
-                     "tpxo_phase": conv_f[name].phase_deg,
-                     "pub_phase": pub_f[name].phase_deg, "dphase": dphase,
+                     "tpxo_amp": convc.amplitude,
+                     "pub_amp": pubc.amplitude, "damp": damp,
+                     "tpxo_phase": convc.phase_deg,
+                     "pub_phase": pubc.phase_deg, "dphase": dphase,
                      "ok": ok, "note": ""})
     shared = [r for r in rows if r["tpxo_amp"] is not None]
     return {"station": station, "region": region,
@@ -485,13 +486,12 @@ def self_check_tpxo(
 
 def format_self_check(rep: dict[str, Any]) -> str:
     """Render a :func:`self_check_tpxo` report as a text table."""
-    lines = [f"self-check: {rep['station']} ({rep['region']}) "
-             f"via {rep['file']} at {rep['point']}"]
+    lines = [(f"self-check: {rep['station']} ({rep['region']}) "
+              f"via {rep['file']} at {rep['point']}")]
     lines.append(f"{'constituent':<12}{'tpxo_amp':>10}{'pub_amp':>10}"
                  f"{'damp':>8}{'dphase':>8}  ok")
     for r in rep["rows"]:
         ta = f"{r['tpxo_amp']:.4f}" if r["tpxo_amp"] is not None else "n/a"
-        tp = f"{r['tpxo_phase']:.2f}" if r["tpxo_phase"] is not None else "n/a"
         da = f"{r['damp']:.4f}" if r["damp"] is not None else "n/a"
         dp = f"{r['dphase']:+.2f}" if r["dphase"] is not None else "n/a"
         note = f"  ({r['note']})" if r["note"] else ""

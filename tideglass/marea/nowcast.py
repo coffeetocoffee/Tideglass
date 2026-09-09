@@ -33,7 +33,6 @@ import numpy as np
 
 from tideglass.marea.model import Prediction, TideModel, _basis_matrix
 
-
 _HOURS_PER_YEAR = 24.0 * 365.25
 _MAX_INNOV = 2000  # rolling history kept for surge fitting / diagnostics
 
