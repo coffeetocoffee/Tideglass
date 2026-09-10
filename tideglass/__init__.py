@@ -7,7 +7,7 @@ surface adds export feeds, a stdlib HTTP API, and a terminal dashboard.
 
 from tideglass import marea, marine
 
-__version__ = "0.9.0"
+__version__ = "1.0.0"
 from tideglass.marea.bench_global import compare, global_model_at, read_harmonic_grid
 from tideglass.marea.calibration import (
     conformal_quantile,
@@ -28,6 +28,11 @@ from tideglass.marea.constituents import (
 )
 from tideglass.marea.contract import api_version, verify_public_api
 from tideglass.marea.crowdsource import GaugeStore
+from tideglass.marea.decision import (
+    CostLoss,
+    DecisionCurve,
+    decision_curve,
+)
 from tideglass.marea.drift import HealthMonitor, HealthReport
 from tideglass.marea.export import (
     read_netcdf,
@@ -47,6 +52,11 @@ from tideglass.marea.extremes import (
     flood_probability,
     joint_exceedance_probability,
     skew_surge,
+)
+from tideglass.marea.federation import (
+    FederatedRefit,
+    FederatedReport,
+    federate,
 )
 from tideglass.marea.harmonics_db import (
     add_harmonic_file,
@@ -72,6 +82,7 @@ from tideglass.marea.plugins import (
     register_pack,
 )
 from tideglass.marea.pooling import HierarchicalPool, PooledConstituent
+from tideglass.marea.qc import QcConfig, QcReport, clean_series, qc_check
 from tideglass.marea.tpxo import (
     format_self_check,
     native_to_model,
@@ -90,6 +101,8 @@ __all__ = [
     "GPD",
     "Advice",
     "Constituent",
+    "CostLoss",
+    "DecisionCurve",
     "GaugeStore",
     "HealthMonitor",
     "HealthReport",
@@ -115,6 +128,7 @@ __all__ = [
     "basis_matrix",
     "benchmark_region",
     "build_dashboard",
+    "clean_series",
     "cold_start",
     "compare",
     "conformal_quantile",
@@ -122,8 +136,13 @@ __all__ = [
     "constituent_attribution",
     "coverage_report",
     "crps_gaussian",
+    "decision_curve",
     "decluster",
+
     "evaluate_calibration",
+    "FederatedRefit",
+    "FederatedReport",
+    "federate",
     "find",
     "fit_gpd",
     "flood_probability",
@@ -145,6 +164,9 @@ __all__ = [
     "pit_values",
     "poll",
     "principal",
+    "qc_check",
+    "QcConfig",
+    "QcReport",
     "read_harmonic_grid",
     "read_netcdf",
     "read_tpxo",

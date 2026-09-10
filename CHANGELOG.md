@@ -4,7 +4,39 @@ All notable changes to Tideglass are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.0]
+Milestone "The moat itself" — the roadmap's final tier. The crowd network
+becomes self-improving, and the marine layer *prices* uncertainty instead of
+just displaying it.
+
+### Added
+- `marea/qc.py` — **QC pipeline for cheap-sensor uploads** (spike / datum /
+  drift): robust MAD spike detection on the local-tide residual, datum-shift
+  detection (vs a reference model, else step change between record halves),
+  robust drift slope on a long-window smoother, plus hard sanity rejections
+  (too few points, non-finite, non-monotonic time, flatlining).
+  `clean_series` interpolates flagged spikes for fitting. `QcConfig`,
+  `QcReport`, `qc_check`, `clean_series` exported at the top level.
+- `marea/federation.py` — **federated refits**: `FederatedRefit.refit`
+  QC-checks an upload, adds it to the `GaugeStore`, then folds it into the
+  network via `HierarchicalPool` (`pool` for dense gauges, `seed_short` for
+  short records) and persists the improved model; per-round `network_effect`
+  before/after makes "every sensor helps everyone" measurable.
+  `FederatedRefit`, `FederatedReport`, `federate` exported.
+- `marea/decision.py` — **decision-theoretic pricing**: the classical
+  cost-loss model over the prediction CI. `decision_curve` prices the act/wait
+  policy per hour (act where `P(event) > cost/loss`, the break-even
+  probability; optimal expected cost `min(cost, p·loss)`) and reports value vs
+  the forecast-blind baselines (always-act / never-act). `CostLoss`,
+  `DecisionCurve`, `decision_curve` exported; `PUBLIC_API` grows additively
+  (contract stays `1.0`).
+- `TideAdvisor.advise(..., cost=, loss=, decision_threshold_m=)` attaches a
+  priced `DecisionCurve` to the `Advice` (threshold defaults to
+  `flood_threshold_m`) — the marine layer stays a thin consumer.
+- CLI: `tideglass qc <csv> <lon> <lat> --station S`,
+  `tideglass federate <csv> <lon> <lat> --station S`, and
+  `tideglass advise ... --flood Z --cost C --loss L`.
+- Project docs `MVP.md` and `architecture.md` are now part of the repository.
 
 ### Fixed
 - `fetch` / `poll` no longer fail on NOAA CO-OPS' **31-day per-request range

@@ -393,10 +393,16 @@ def cmd_advise(args) -> int:
     model = _load_station(args.store, args.station)
     if model is None:
         return 2
+    if (args.cost is not None or args.loss is not None) and args.flood is None:
+        print("tideglass advise: --cost/--loss require --flood (the event "
+              "threshold the decision prices)", file=sys.stderr)
+        return 2
     times = [day + timedelta(hours=h) for h in range(args.days * 24)]
     print(TideAdvisor(model).advise(
         times, flood_threshold_m=args.flood,
-        surge_sigma_m=args.surge_sigma).summary)
+        surge_sigma_m=args.surge_sigma,
+        decision_threshold_m=args.flood,
+        cost=args.cost, loss=args.loss).summary)
     return 0
 
 
@@ -582,6 +588,52 @@ def cmd_network(args) -> int:
     print(f"network-effect gain in explained variance: "
           f"{eff['gain_total_explained']:+.4f}")
     return 0
+
+
+def cmd_qc(args) -> int:
+    from tideglass.marea.qc import clean_series, qc_check
+
+    try:
+        times, heights = read_csv(args.csv)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass qc: {exc}", file=sys.stderr)
+        return 2
+    rep = qc_check(times, heights)
+    print(str(rep))
+    if rep.spike_idx:
+        print(f"flagged indices: {rep.spike_idx}")
+    if rep.passed:
+        _, cleaned = clean_series(times, heights, rep)
+        print(f"cleaned observations: {len(cleaned)}")
+    return 0 if rep.passed else 2
+
+
+def cmd_federate(args) -> int:
+    from tideglass.marea.federation import FederatedRefit
+
+    try:
+        times, heights = read_csv(args.csv)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass federate: {exc}", file=sys.stderr)
+        return 2
+    fed = FederatedRefit(args.store, variance_threshold=0.95)
+    try:
+        rep = fed.refit(
+            args.station, args.lon, args.lat, times, heights,
+            source=args.source, alpha=args.alpha,
+        )
+    except (ValueError, OSError) as exc:
+        print(f"tideglass federate: {exc}", file=sys.stderr)
+        return 2
+    print(str(rep))
+    if rep.network_before and rep.network_after:
+        gain = (rep.network_after["gain_total_explained"]
+                - rep.network_before["gain_total_explained"])
+        print(f"network-effect gain: {gain:+.4f} explained variance "
+              f"({rep.network_before['n_total']} -> {rep.network_after['n_total']} gauges)")
+    if rep.improved:
+        print(f"improved model saved: {os.path.join(fed.store.root, args.station + '.json')}")
+    return 0 if rep.qc.passed else 2
 
 
 def cmd_validate(args) -> int:
@@ -847,6 +899,14 @@ def build_parser() -> argparse.ArgumentParser:
                             "(e.g. a GPD return level from `tideglass extremes`)")
     p_adv.add_argument("--surge-sigma", type=float, default=0.0,
                        help="surge std (m) folded into the flood probability")
+    p_adv.add_argument("--cost", type=float, default=None,
+                       help="cost of the protective action per hour; with "
+                            "--loss, prices the act/wait decision policy "
+                            "(requires --flood as the event threshold)")
+    p_adv.add_argument("--loss", type=float, default=None,
+                       help="loss if the event hits an unprepared hour; with "
+                            "--cost, prices the act/wait decision policy "
+                            "(requires --flood as the event threshold)")
     p_adv.set_defaults(func=cmd_advise)
 
     p_fetch = sub.add_parser("fetch", help="download NOAA CO-OPS gauge CSV")
@@ -945,6 +1005,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_val = sub.add_parser("validate", help="global coverage + per-region benchmark")
     p_val.add_argument("--region", default=None, help="limit to one region")
     p_val.set_defaults(func=cmd_validate)
+
+    p_qc = sub.add_parser("qc", help="quality-check a crowd-sourced sensor upload")
+    p_qc.add_argument("csv", help="CSV with time,height rows (cheap-sensor upload)")
+    p_qc.add_argument("lon", type=float, help="station longitude (deg)")
+    p_qc.add_argument("lat", type=float, help="station latitude (deg)")
+    p_qc.add_argument("--station", required=True, help="unique station id")
+    p_qc.add_argument("--store", default=DEFAULT_STORE, help="gauge store dir")
+    p_qc.add_argument("--source", default="crowd", help="uploader/source tag")
+    p_qc.set_defaults(func=cmd_qc)
+
+    p_fed = sub.add_parser(
+        "federate", help="QC + local fit + federated pooled refit of a sensor")
+    p_fed.add_argument("csv", help="CSV with time,height rows (cheap-sensor upload)")
+    p_fed.add_argument("lon", type=float, help="station longitude (deg)")
+    p_fed.add_argument("lat", type=float, help="station latitude (deg)")
+    p_fed.add_argument("--station", required=True, help="unique station id")
+    p_fed.add_argument("--store", default=DEFAULT_STORE, help="gauge store dir")
+    p_fed.add_argument("--source", default="crowd", help="uploader/source tag")
+    p_fed.add_argument("--alpha", type=float, default=0.05,
+                       help="selection significance for the local fit")
+    p_fed.set_defaults(func=cmd_federate)
 
     p_pool = sub.add_parser(
         "pool", help="partially-pooled model for a short record "
