@@ -8,7 +8,9 @@
                  (PATH may be a CSV grid or a genuine TPXO/FES NetCDF3 .nc file)
     tideglass advise <station> <date> [--store DIR] [--days N]
                   [--flood M] [--surge-sigma S]
-    tideglass fetch <station> <begin> <end> [--out CSV] [--datum D] [--interval I]
+    tideglass fetch <station> <begin> <end> [--out CSV] [--datum D] [--interval I] [--met]
+    tideglass surge <obs.csv> <met.csv> [--station S] [--store DIR] [--max-lag H]
+                  [--forecast MET.csv] [--hours H] [--flood M] [--cost C --loss L]
     tideglass nowcast <station> <feed.csv> [--store DIR] [--alpha A]
                  [--auto-refit | --no-auto-refit] [--hours H]
     tideglass poll <station> [--store DIR] [--lookback-h H] [--repeat N]
@@ -19,7 +21,9 @@
 
 ``fit`` reads ``time,height`` rows (ISO-8601 datetimes, metres) and saves a
 model artifact; ``predict`` prints an hourly height curve with 95% bands;
-``fetch`` downloads a gauge CSV directly from NOAA CO-OPS; ``nowcast``
+``fetch`` downloads a gauge CSV directly from NOAA CO-OPS (``--met``: wind +
+pressure instead); ``surge`` learns the local wind/pressure → surge response
+and forecasts surge from met forcing; ``nowcast``
 assimilates a fresh feed into the deployed model (with drift check and
 optional auto-refit); ``poll`` repeats that live against NOAA on a sleep loop;
 ``pool`` fits a short record by borrowing strength from the network;
@@ -407,6 +411,24 @@ def cmd_advise(args) -> int:
 
 
 def cmd_fetch(args) -> int:
+    if args.met:
+        from tideglass.fetch import fetch_met_range, write_met_csv
+
+        out = args.out or f"{args.station}.met.csv"
+        try:
+            rows = fetch_met_range(args.station, args.begin, args.end)
+        except (OSError, ValueError) as exc:
+            print(f"tideglass fetch: {exc}", file=sys.stderr)
+            return 2
+        if not rows:
+            print(f"tideglass fetch: no data for station {args.station!r}",
+                  file=sys.stderr)
+            return 2
+        write_met_csv(rows, out)
+        print(f"station: {args.station}  rows: {len(rows)} (wind + pressure)")
+        print(f"saved: {out}")
+        return 0
+
     from tideglass.fetch import fetch_noaa_range, write_csv
 
     out = args.out or f"{args.station}.csv"
@@ -672,6 +694,129 @@ def cmd_correct(args) -> int:
               f"{diag['coverage_after']:.4f} "
               f"(conformal q={diag['conformal_q']:.3f})")
     print(f"saved: {path} (bias table applied by every predict)")
+    return 0
+
+
+def cmd_surge(args) -> int:
+    import numpy as np
+    from tideglass.marea.decision import decision_curve
+    from tideglass.marea.extremes import flood_probability
+    from tideglass.marea.met import learn_met_response, read_met_csv
+    from tideglass.marea.surge import fit_ar1
+
+    try:
+        times, heights = read_csv(args.csv)
+        mt, ws, wd, pr = read_met_csv(args.met_csv)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass surge: {exc}", file=sys.stderr)
+        return 2
+    order = sorted(range(len(times)), key=lambda i: times[i])
+    times = [times[i] for i in order]
+    heights = np.array([heights[i] for i in order], dtype=float)
+
+    station = args.station or os.path.splitext(os.path.basename(args.csv))[0]
+    model_path = os.path.join(args.store, f"{station}.json")
+    if os.path.exists(model_path):
+        model = TideModel.load_harmonic(model_path)
+    else:
+        # self-contained: fit (and save) a harmonic model from the same record
+        try:
+            model = TideModel.fit(times, heights, station=station,
+                                  source=f"csv:{args.csv}")
+        except ValueError as exc:
+            print(f"tideglass surge: {exc}", file=sys.stderr)
+            return 2
+        os.makedirs(args.store, exist_ok=True)
+        with open(model_path, "w") as fh:
+            json.dump(model.to_artifact(), fh, indent=2)
+
+    pred = model.predict(times)
+    resid = heights - np.asarray(pred.mean, dtype=float)
+    try:
+        resp, diag = learn_met_response(
+            times, resid, mt, ws, wd, pr,
+            max_lag_hours=args.max_lag, p_ref=args.p_ref)
+    except ValueError as exc:
+        print(f"tideglass surge: {exc}", file=sys.stderr)
+        return 2
+
+    os.makedirs(args.store, exist_ok=True)
+    met_path = os.path.join(args.store, f"{station}.met.json")
+    with open(met_path, "w") as fh:
+        json.dump(resp.to_dict(), fh, indent=2)
+
+    print(f"station: {station}  n: {diag['n']}  lag: {diag['lag']} h")
+    print("response: surge = c0 + a*tau_u + b*tau_v + beta*dp")
+    print(f"  intercept: {resp.intercept:+.4f} m")
+    print(f"  stress u:  {resp.stress_u:+.5f} m/(m2/s2)")
+    print(f"  stress v:  {resp.stress_v:+.5f} m/(m2/s2)")
+    print(f"  barometer: {resp.barometer:+.5f} m/hPa  "
+          f"(theory {diag['barometer_theory']:+.5f}, "
+          f"ratio {diag['barometer_ratio']:.2f})")
+    print(f"  fit: r2 {diag['r2']:.3f}  sigma {diag['sigma']:.4f} m  "
+          f"(rmse {diag['rmse_before']:.4f} -> {diag['rmse_after']:.4f} m)")
+    print(f"saved: {met_path}")
+
+    if args.forecast:
+        try:
+            ft, fws, fwd, fpr = read_met_csv(args.forecast)
+        except (OSError, ValueError) as exc:
+            print(f"tideglass surge: {exc}", file=sys.stderr)
+            return 2
+        if ft:
+            f0 = ft[0]
+            keep = [i for i, t in enumerate(ft)
+                    if (t - f0).total_seconds() / 3600.0 < args.hours]
+            ft = [ft[i] for i in keep]
+            fws = np.asarray(fws)[keep]
+            fwd = np.asarray(fwd)[keep]
+            fpr = np.asarray(fpr)[keep]
+        try:
+            ar = fit_ar1(resid)
+        except ValueError:
+            ar = None
+        # Prepend the met history tail so the fitted lag can interpolate real
+        # forcing (not clamps) for the first lag hours of the forecast.
+        pre = max(resp.lag_hours + 1, 1)
+        gt = list(mt[-pre:]) + list(ft)
+        gws = np.concatenate([np.asarray(ws[-pre:]), np.asarray(fws)])
+        gwd = np.concatenate([np.asarray(wd[-pre:]), np.asarray(fwd)])
+        gpr = np.concatenate([np.asarray(pr[-pre:]), np.asarray(fpr)])
+        fc_all = resp.forecast(gt, gws, gwd, gpr, ar=ar,
+                               last_residual=float(resid[-1]), origin=times[-1])
+        fc_mean = np.asarray(fc_all.mean, dtype=float)[pre:]
+        fc_sigma = np.asarray(fc_all.sigma, dtype=float)[pre:]
+        tide_pred = model.predict(ft)
+        p = None
+        if args.flood is not None and len(ft):
+            p = flood_probability(tide_pred, args.flood,
+                                  surge_mean=fc_mean, surge_sigma=fc_sigma)
+        print(f"\nsurge forecast ({args.hours} h from {ft[0].isoformat()}):")
+        for i, t in enumerate(ft):
+            line = (f"  {t.isoformat()}  {fc_mean[i]:+.3f} m "
+                    f"+/- {1.96 * fc_sigma[i]:.3f}")
+            if p is not None:
+                line += f"   P(flood>{args.flood:.2f})={p[i]:.4f}"
+            print(line)
+        if (args.cost is not None or args.loss is not None) \
+                and args.flood is None:
+            print("tideglass surge: --cost/--loss require --flood "
+                  "(the event threshold)", file=sys.stderr)
+            return 2
+        if (args.cost is not None) != (args.loss is not None):
+            print("tideglass surge: --cost and --loss must be given together",
+                  file=sys.stderr)
+            return 2
+        if args.cost is not None:
+            try:
+                curve = decision_curve(
+                    ft, tide_pred, args.flood, args.cost, args.loss,
+                    surge_mean=fc_mean, surge_sigma=fc_sigma)
+            except ValueError as exc:
+                print(f"tideglass surge: {exc}", file=sys.stderr)
+                return 2
+            print()
+            print(str(curve))
     return 0
 
 
@@ -955,7 +1100,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_fetch.add_argument("--out", default=None, help="output CSV (default: <station>.csv)")
     p_fetch.add_argument("--datum", default="MLLW", help="NOAA vertical datum")
     p_fetch.add_argument("--interval", default="h", choices=["h", "1", "hilo"],
-                         help="passed to NOAA (observed water levels are 6-min)")
+                          help="passed to NOAA (observed water levels are 6-min)")
+    p_fetch.add_argument("--met", action="store_true",
+                         help="fetch meteorological wind + pressure instead of "
+                              "water levels (writes <station>.met.csv)")
     p_fetch.set_defaults(func=cmd_fetch)
 
     p_now = sub.add_parser(
@@ -1118,6 +1266,38 @@ def build_parser() -> argparse.ArgumentParser:
     p_plug.add_argument("--speeds", action="store_true",
                         help="also print every constituent's derived speed")
     p_plug.set_defaults(func=cmd_plugins)
+
+    p_surge = sub.add_parser(
+        "surge", help="learn the wind/pressure surge response; forecast surge "
+                      "from a met forecast (v1.2)")
+    p_surge.add_argument("csv", help="CSV file with time,height observations")
+    p_surge.add_argument("met_csv", help="concurrent met CSV: time,wind_speed,"
+                                         "wind_dir,pressure")
+    p_surge.add_argument("--station", default=None,
+                         help="station name (default: CSV stem)")
+    p_surge.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
+    p_surge.add_argument("--max-lag", type=int, default=6,
+                         help="maximum forcing-to-surge lag scanned (hours)")
+    p_surge.add_argument("--p-ref", type=float, default=1013.25,
+                         help="reference pressure for the inverse-barometer "
+                              "anomaly (hPa)")
+    p_surge.add_argument("--forecast", default=None,
+                         help="met forecast CSV (same format) to run through "
+                              "the learned response")
+    p_surge.add_argument("--hours", type=int, default=48,
+                         help="forecast horizon kept from the met CSV (hours)")
+    p_surge.add_argument("--flood", type=float, default=None,
+                         help="alarm level (m): prints P(level > flood) per "
+                              "forecast hour")
+    p_surge.add_argument("--cost", type=float, default=None,
+                         help="cost of the protective action per hour; with "
+                              "--loss, prices the act/wait decision (needs "
+                              "--flood)")
+    p_surge.add_argument("--loss", type=float, default=None,
+                         help="loss if the event hits an unprepared hour; "
+                              "with --cost, prices the act/wait decision "
+                              "(needs --flood)")
+    p_surge.set_defaults(func=cmd_surge)
     return ap
 
 

@@ -11,6 +11,7 @@ from tideglass.marea import (
     harmonics_db,
     kalman,
     krige,
+    met,
     metrics,
     model,
     nowcast,
@@ -33,6 +34,7 @@ from tideglass.marea.crowdsource import GaugeStore
 from tideglass.marea.drift import HealthMonitor, HealthReport
 from tideglass.marea.kalman import JointFit, JointModel
 from tideglass.marea.krige import KrigeField, krige_field, krige_regional
+from tideglass.marea.met import MetResponse, SurgeForecast, learn_met_response
 from tideglass.marea.model import Fit, Prediction, TideModel
 from tideglass.marea.nowcast import NowcastEngine, UpdateLog, load_state, save_state
 from tideglass.marea.ops import OpsReport, cold_start, poll, rerun
@@ -56,10 +58,12 @@ __all__ = [
     "JointFit",
     "JointModel",
     "KrigeField",
+    "MetResponse",
     "NowcastEngine",
     "OpsReport",
     "Prediction",
     "ResponseTransfer",
+    "SurgeForecast",
     "TideModel",
     "TransferCoefficients",
     "UpdateLog",
@@ -85,7 +89,9 @@ __all__ = [
     "krige",
     "krige_field",
     "krige_regional",
+    "learn_met_response",
     "load_state",
+    "met",
     "metrics",
     "model",
     "native_to_model",

@@ -6,6 +6,36 @@ All notable changes to Tideglass are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added — v1.2 "Surge becomes a real forecast"
+- `marea/met.py` — **met-forced surge response**, the last physics gap: surge
+  was AR(1) — it decayed, it never predicted. `learn_met_response` regresses
+  gauge residuals (obs − tide) onto **wind-stress components**
+  (τ ∝ −|W|²·(sin θ, cos θ), quadratic drag, meteorological from-direction)
+  and the **inverse-barometer** pressure anomaly by OLS, scanning the
+  forcing→surge lag (0..max-lag h, best fit wins). The learned barometer is
+  sanity-checked against the theoretical −1/(ρ·g) ≈ −0.0099 m/hPa
+  (`BARO_THEORY_M_PER_HPA`); `MetResponse.surge` applies the lagged response
+  to any forcing, `MetResponse.forecast` produces the 48-h surge forecast —
+  the met-driven mean does **not** decay with lead time (the nowcast→forecast
+  jump), with the v0.6 AR(1) layered on the unexplained residual (band grows
+  toward the residual marginal). Persists as `<station>.met.json`.
+- **Met ingestion** — `fetch.fetch_met` / `fetch_met_range` pull NOAA CO-OPS
+  `wind` + `air_pressure` products (merged on timestamp, chunked at the 31-day
+  cap, deduped at seams); `write_met_csv` / `met.read_met_csv` round-trip the
+  `time,wind_speed,wind_dir,pressure` format any forecast source (NWS export,
+  hand file) can emit. CLI `tideglass fetch --met`.
+- **Downstream wiring** — `extremes.flood_probability` and
+  `decision.decision_curve` accept **per-time** `surge_mean`/`surge_sigma`
+  arrays (backward-compatible scalars), so a met-forced surge forecast prices
+  the act/wait decision directly.
+- CLI: `tideglass surge <obs.csv> <met.csv> [--station --store --max-lag
+  --p-ref] [--forecast met.csv --hours 48] [--flood M] [--cost C --loss L]` —
+  learns the response (auto-fitting and saving the harmonic model when absent),
+  prints diagnostics, hourly surge ± band, P(flood), and the priced
+  `DecisionCurve`.
+- Top-level exports (additive, contract stays `1.0`): `MetResponse`,
+  `SurgeForecast`, `learn_met_response`.
+
 ### Added — v1.1 "The engine that learns"
 - `marea/residual.py` — **residual memory**: a learned day-of-year bias table
   (`learn_residual` → `ResidualModel`) fitted to post-harmonic residuals with

@@ -113,8 +113,11 @@ def decision_curve(
         ``tideglass extremes`` or a flood alarm level.
     :param cost: cost of acting for one time step.
     :param loss: loss if the event hits during one unprepared time step.
-    :param surge_mean: mean surge added to the predictive mean (m).
+    :param surge_mean: mean surge added to the predictive mean (m). Scalar or
+        a per-time array matching ``prediction`` (e.g. the v1.2 met-forced
+        surge forecast).
     :param surge_sigma: surge std (m) folded into the event probability.
+        Scalar or per-time array.
     :returns: a :class:`DecisionCurve`.
     """
     if loss <= 0:

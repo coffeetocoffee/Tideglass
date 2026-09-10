@@ -292,19 +292,24 @@ def joint_exceedance_probability(tide, surge, level) -> float | np.ndarray:
 
 
 def flood_probability(prediction, threshold,
-                      surge_mean: float = 0.0, surge_sigma: float = 0.0
-                      ) -> np.ndarray:
+                       surge_mean: float = 0.0, surge_sigma: float = 0.0
+                       ) -> np.ndarray:
     """Per-time ``P(water level > threshold)`` — the probabilistic threshold.
 
     Combines the predictive tide Gaussian (mean plus the ``lower``/``upper``
     band) with a surge distribution ``N(surge_mean, surge_sigma²)`` (e.g. the
-    AR(1) forecast std or the fitted surge marginal). ``threshold`` may be a
-    scalar alarm level (a GPD return level, say) or a per-time array.
+    AR(1) forecast std or the v1.2 met-forced surge forecast). ``threshold``
+    may be a scalar alarm level (a GPD return level, say) or a per-time array.
+    ``surge_mean`` / ``surge_sigma`` broadcast: pass scalars (a single surge
+    estimate) or equal-length arrays (a per-time surge forecast feeding the
+    decision pricing directly).
     """
-    mu = np.asarray(prediction.mean, dtype=float).ravel() + float(surge_mean)
+    mu = np.asarray(prediction.mean, dtype=float).ravel() \
+        + np.asarray(surge_mean, dtype=float)
     lo = np.asarray(prediction.lower, dtype=float).ravel()
     hi = np.asarray(prediction.upper, dtype=float).ravel()
     z = np.asarray(threshold, dtype=float)
     sig_tide = (hi - lo) / (2.0 * _Z95)
-    sig = np.sqrt(np.maximum(sig_tide**2 + float(surge_sigma) ** 2, 1e-12))
+    sig_s = np.asarray(surge_sigma, dtype=float)
+    sig = np.sqrt(np.maximum(sig_tide**2 + sig_s**2, 1e-12))
     return 1.0 - _norm_cdf((z - mu) / sig)
