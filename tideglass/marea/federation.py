@@ -208,7 +208,7 @@ class FederatedRefit:
             return {}
         try:
             return self.global_fed.models()
-        except Exception:
+        except (OSError, ValueError, KeyError):
             return {}
 
     def refit(
@@ -289,8 +289,8 @@ def _pkg_version() -> str:
         from importlib.metadata import version
 
         return version("tideglass")
-    except Exception:
-        return "1.0.0"
+    except (ImportError, OSError):
+        return "2.0.1"
 
 
 def _alias(peer_id: str, name: str) -> str:
@@ -355,7 +355,7 @@ class PeerBundle:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "PeerBundle":
+    def from_dict(cls, d: dict) -> PeerBundle:
         stations: dict[str, StationContribution] = {}
         for a, c in d.get("stations", {}).items():
             stations[a] = StationContribution(
@@ -382,7 +382,7 @@ class PeerBundle:
             json.dump(self.to_dict(), fh, indent=2)
 
     @classmethod
-    def load(cls, path: str) -> "PeerBundle":
+    def load(cls, path: str) -> PeerBundle:
         with open(path) as fh:
             return cls.from_dict(json.load(fh))
 

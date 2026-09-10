@@ -800,6 +800,7 @@ def cmd_correct(args) -> int:
 
 def cmd_surge(args) -> int:
     import numpy as np
+
     from tideglass.marea.decision import decision_curve
     from tideglass.marea.extremes import flood_probability
     from tideglass.marea.met import learn_met_response, read_met_csv

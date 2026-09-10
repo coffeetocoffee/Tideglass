@@ -43,7 +43,7 @@ PUBLIC_API: frozenset[str] = frozenset({
     "QcConfig", "QcReport", "read_harmonic_grid",
     "read_netcdf", "read_tpxo", "register_constituent", "register_pack",
     "reliability_curve", "RegimeCalibration", "ResidualModel",
-    "learn_residual", "rerun",
+    "rerun",
     "run_server", "self_check_tpxo", "skew_surge",
     "speed", "stations_in_region", "surge_events", "to_json", "to_xtide",
     "tpxo_model_at", "TrustLedger",

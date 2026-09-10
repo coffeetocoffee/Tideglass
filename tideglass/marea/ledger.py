@@ -73,13 +73,13 @@ class LedgerReport:
             return (f"ledger: {self.n_decisions} decision(s) logged, "
                     f"0 resolved (awaiting realized levels)")
         lines = [
-            f"ledger: {self.n_decisions} decision(s) logged, "
-            f"{self.n_resolved} resolved",
+            (f"ledger: {self.n_decisions} decision(s) logged, "
+             f"{self.n_resolved} resolved"),
             f"  realized cost:        {self.total_realized:.2f}",
-            f"  always-act baseline:  {self.total_always:.2f}  "
-            f"(forecast earned {self.earned_vs_always:+.2f})",
-            f"  never-act baseline:   {self.total_never:.2f}  "
-            f"(forecast earned {self.earned_vs_never:+.2f})",
+            (f"  always-act baseline:  {self.total_always:.2f}  "
+             f"(forecast earned {self.earned_vs_always:+.2f})"),
+            (f"  never-act baseline:   {self.total_never:.2f}  "
+             f"(forecast earned {self.earned_vs_never:+.2f})"),
         ]
         if self.recall is not None:
             lines.append(f"  event recall:    {self.recall:.2%}")
