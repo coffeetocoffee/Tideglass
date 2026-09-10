@@ -7,7 +7,7 @@ surface adds export feeds, a stdlib HTTP API, and a terminal dashboard.
 
 from tideglass import marea, marine
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 from tideglass.marea.bench_global import compare, global_model_at, read_harmonic_grid
 from tideglass.marea.calibration import (
     conformal_quantile,
@@ -56,6 +56,8 @@ from tideglass.marea.extremes import (
 from tideglass.marea.federation import (
     FederatedRefit,
     FederatedReport,
+    GlobalFederation,
+    PeerBundle,
     TrustLedger,
     federate,
 )
@@ -112,6 +114,7 @@ __all__ = [
     "FederatedRefit",
     "FederatedReport",
     "GaugeStore",
+    "GlobalFederation",
     "HealthMonitor",
     "HealthReport",
     "HierarchicalPool",
@@ -122,6 +125,7 @@ __all__ = [
     "OpsReport",
     "PooledConstituent",
     "Prediction",
+    "PeerBundle",
     "QcConfig",
     "QcReport",
     "RegimeCalibration",

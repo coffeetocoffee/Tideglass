@@ -674,7 +674,11 @@ def cmd_federate(args) -> int:
     except (OSError, ValueError) as exc:
         print(f"tideglass federate: {exc}", file=sys.stderr)
         return 2
-    fed = FederatedRefit(args.store, variance_threshold=0.95)
+    global_store = None
+    if args.global_store:
+        global_store = os.path.join(args.global_store, "federation")
+    fed = FederatedRefit(args.store, variance_threshold=0.95,
+                         global_root=global_store)
     try:
         rep = fed.refit(
             args.station, args.lon, args.lat, times, heights,
@@ -692,9 +696,70 @@ def cmd_federate(args) -> int:
     if rep.trust is not None:
         print(f"trust: {rep.trust:.3f} (QC reputation; low trust down-weights "
               "the sensor in the pool)")
+    if rep.global_network_size is not None:
+        print(f"borrowed strength from {rep.global_network_size} stations "
+              "across the installed base")
     if rep.improved:
         print(f"improved model saved: {os.path.join(fed.store.root, args.station + '.json')}")
     return 0 if rep.qc.passed else 2
+
+
+def cmd_sync(args) -> int:
+    from tideglass.marea.federation import build_peer_bundle
+
+    try:
+        bundle = build_peer_bundle(args.store, args.peer_id)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass sync: {exc}", file=sys.stderr)
+        return 2
+    out = args.out or os.path.join(args.store, "peer_bundle.json")
+    try:
+        bundle.save(out)
+    except OSError as exc:
+        print(f"tideglass sync: {exc}", file=sys.stderr)
+        return 2
+    print(f"peer_id: {bundle.peer_id}  stations: {len(bundle.stations)}  "
+          f"tideglass: {bundle.tideglass_version}")
+    print("anonymized: station identities stay local; bundle carries "
+          f"{len(bundle.stations)} one-way alias(es) only")
+    print(f"saved: {out}")
+    return 0
+
+
+def cmd_merge(args) -> int:
+    from tideglass.marea.federation import GlobalFederation, PeerBundle
+
+    fed = GlobalFederation(os.path.join(args.store, "federation"))
+    paths: list[str] = list(args.bundle)
+    for p in list(paths):
+        if os.path.isdir(p):
+            paths.remove(p)
+            for fn in sorted(os.listdir(p)):
+                if fn.endswith(".json"):
+                    paths.append(os.path.join(p, fn))
+    n = 0
+    for p in paths:
+        try:
+            b = PeerBundle.load(p)
+        except (OSError, ValueError) as exc:
+            print(f"tideglass merge: skipping {p}: {exc}", file=sys.stderr)
+            continue
+        try:
+            fed.ingest(b)
+        except ValueError as exc:
+            print(f"tideglass merge: skipping {p}: {exc}", file=sys.stderr)
+            continue
+        n += 1
+    rep = fed.report()
+    print(f"merged: {n} peer bundle(s)")
+    print(f"federation: {rep['n_peers']} peers, {rep['n_stations']} stations "
+          "across the installed base")
+    resid = rep.get("residual")
+    if resid:
+        print(f"residual stats: mean rmse {resid['mean_rmse']:.4f} m "
+              f"over {resid['n']} station(s)")
+    print(f"saved: {fed.peers_dir}")
+    return 0
 
 
 def cmd_correct(args) -> int:
@@ -1255,8 +1320,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_fed.add_argument("--store", default=DEFAULT_STORE, help="gauge store dir")
     p_fed.add_argument("--source", default="crowd", help="uploader/source tag")
     p_fed.add_argument("--alpha", type=float, default=0.05,
-                       help="selection significance for the local fit")
+                      help="selection significance for the local fit")
+    p_fed.add_argument("--global-store", default=None,
+                      help="global federation dir; borrow strength from the "
+                           "installed base when pooling this sensor (v2.0)")
     p_fed.set_defaults(func=cmd_federate)
+
+    p_sync = sub.add_parser(
+        "sync", help="export the local network as an anonymized peer bundle (v2.0)")
+    p_sync.add_argument("--store", default=DEFAULT_STORE, help="gauge store dir")
+    p_sync.add_argument("--peer-id", required=True,
+                       help="this installation's federation peer id")
+    p_sync.add_argument("--out", default=None,
+                       help="bundle JSON path (default: <store>/peer_bundle.json)")
+    p_sync.set_defaults(func=cmd_sync)
+
+    p_merge = sub.add_parser(
+        "merge", help="ingest peer bundle(s) into the global federation (v2.0)")
+    p_merge.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
+    p_merge.add_argument("bundle", nargs="+",
+                        help="peer bundle JSON file(s) or director(y/ies) of them")
+    p_merge.set_defaults(func=cmd_merge)
 
     p_pool = sub.add_parser(
         "pool", help="partially-pooled model for a short record "
