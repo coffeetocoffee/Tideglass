@@ -67,6 +67,7 @@ class HierarchicalPool:
         self,
         models: dict[str, TideModel],
         coords: dict[str, tuple[float, float]] | None = None,
+        trust: dict[str, float] | None = None,
     ):
         """Build the pool from fitted member models.
 
@@ -75,15 +76,26 @@ class HierarchicalPool:
             coordinates are known, the regional prior becomes the
             inverse-distance-weighted *neighbour* mean (leave-self-out);
             otherwise it is the inverse-variance-weighted network mean.
+        :param trust: optional ``{station: weight}`` in ``[0, 1]`` (v1.1).
+            Trust scales a station's information: low-trust members contribute
+            less to the regional prior and shrink harder toward it
+            (``s² → s²/trust``), so unreliable sensors borrow strength instead
+            of contaminating the network.
         """
         if len(models) < 2:
             raise ValueError(
                 f"need at least 2 stations to pool, got {len(models)}")
         self._models = dict(models)
         self._coords = dict(coords or {})
+        self._trust = {k: float(v) for k, v in (trust or {}).items()}
         unknown = set(self._coords) - set(self._models)
         if unknown:
             raise ValueError(f"coords for unknown stations: {sorted(unknown)}")
+        bad = set(self._trust) - set(self._models)
+        if bad:
+            raise ValueError(f"trust for unknown stations: {sorted(bad)}")
+        if any(not (0.0 < w <= 1.0) for w in self._trust.values()):
+            raise ValueError("trust weights must lie in (0, 1]")
         self._union = self._union_constituents()
 
     # -- inventory ---------------------------------------------------------
@@ -106,18 +118,24 @@ class HierarchicalPool:
         return ordered + [CON.get(n) for n in extra]
 
     def _station_ab(self, station: str, name: str):
-        """``(a, b, se_a, se_b)`` of one constituent, or ``None`` if absent."""
+        """``(a, b, se_a, se_b)`` of one constituent, or ``None`` if absent.
+
+        Trust (v1.1) enters here: a station with trust ``w`` reports its own
+        fit with inflated uncertainty ``s²/w``, so it speaks with proportionally
+        less weight in the regional prior and shrinks harder toward it.
+        """
         m = self._models[station]
         names = [c.name for c in m._constituents]
         if name not in names:
             return None
         j = names.index(name)
         C = m._covariance
+        w = self._trust.get(station, 1.0)
         return (
             float(m._coef[1 + 2 * j]),
             float(m._coef[2 + 2 * j]),
-            math.sqrt(max(float(C[1 + 2 * j, 1 + 2 * j]), 0.0)),
-            math.sqrt(max(float(C[2 + 2 * j, 2 + 2 * j]), 0.0)),
+            math.sqrt(max(float(C[1 + 2 * j, 1 + 2 * j]), 0.0) / w),
+            math.sqrt(max(float(C[2 + 2 * j, 2 + 2 * j]), 0.0) / w),
         )
 
     # -- regional prior ----------------------------------------------------
@@ -189,14 +207,15 @@ class HierarchicalPool:
         consts = self._union
         names = [c.name for c in consts]
         own_names = [c.name for c in own._constituents]
+        own_trust = self._trust.get(target, 1.0)
         own_by_name = {}
         for j, n in enumerate(own_names):
             C = own._covariance
             own_by_name[n] = (
                 float(own._coef[1 + 2 * j]),
-                math.sqrt(max(float(C[1 + 2 * j, 1 + 2 * j]), 0.0)),
+                math.sqrt(max(float(C[1 + 2 * j, 1 + 2 * j]), 0.0) / own_trust),
                 float(own._coef[2 + 2 * j]),
-                math.sqrt(max(float(C[2 + 2 * j, 2 + 2 * j]), 0.0)),
+                math.sqrt(max(float(C[2 + 2 * j, 2 + 2 * j]), 0.0) / own_trust),
             )
         p = 1 + 2 * len(consts)
         coef = np.zeros(p)
@@ -238,6 +257,9 @@ class HierarchicalPool:
             "shrinkage": shrink,
             "tau": taus,
         }
+        if self._trust:
+            meta["trust"] = {s: self._trust.get(s, 1.0)
+                             for s in sorted(self._models)}
         return TideModel(consts, coef, cov, float(own._sigma2), fits,
                          station=target, source="pooled", meta=meta)
 

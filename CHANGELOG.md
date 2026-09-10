@@ -4,6 +4,25 @@ All notable changes to Tideglass are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/); this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added — v1.1 "The engine that learns"
+- `marea/residual.py` — **residual memory**: a learned day-of-year bias table
+  (`learn_residual` → `ResidualModel`) fitted to post-harmonic residuals with
+  robust circular bins, conformalized on a held-out tail. Attached via
+  `TideModel.attach_residual`, it is applied by every `predict()` and survives
+  the artifact round-trip (`meta["residual_bias"]`). The harmonics stay the
+  physics; the bias table is the asset pytides/TPXO cannot have. CLI
+  `tideglass correct <csv> --station S` prints before/after RMSE + coverage.
+- **Trust-weighted federation** — `federation.trust_score` /
+  `TrustLedger` turn v1.0's QC history into a per-sensor reputation in (0, 1];
+  `HierarchicalPool(..., trust=)` inflates low-trust members' own uncertainty
+  (`s²/w`) so unreliable sensors shrink toward the regional prior instead of
+  contaminating it. `FederatedRefit` records every QC pass and pools with
+  ledger weights; `FederatedReport.trust` / CLI `federate` report it.
+- Top-level exports (additive, contract stays `1.0`): `ResidualModel`,
+  `learn_residual`, `TrustLedger`.
+
 ## [1.0.0]
 Milestone "The moat itself" — the roadmap's final tier. The crowd network
 becomes self-improving, and the marine layer *prices* uncertainty instead of

@@ -115,6 +115,7 @@ class TideModel:
         self.station = station
         self.source = source
         self.meta = dict(meta or {})
+        self._residual = None  # optional learned bias layer (v1.1)
 
     # -- construction --------------------------------------------------------
 
@@ -215,24 +216,52 @@ class TideModel:
         restored_meta.setdefault("source", "harmonic")
         if "station" not in restored_meta and data.get("station"):
             restored_meta["station"] = data.get("station")
-        return cls(
+        model = cls(
             consts, coef, np.zeros((p, p)), 0.0, fits,
             station=station or data.get("station"), source="harmonic",
             meta=restored_meta or None,
         )
+        if restored_meta.get("residual_bias") is not None:
+            from tideglass.marea.residual import ResidualModel
+
+            model._residual = ResidualModel.from_dict(
+                restored_meta["residual_bias"])
+        return model
 
     # -- use ---------------------------------------------------------------
 
+    def attach_residual(self, residual_model) -> None:
+        """Attach a learned bias layer (v1.1) — applied by every ``predict``.
+
+        The table is also pinned into ``meta["residual_bias"]`` so it survives
+        the ``to_artifact()`` → ``load_harmonic()`` round-trip.
+        """
+        self._residual = residual_model
+        self.meta["residual_bias"] = residual_model.to_dict()
+
+    @property
+    def residual(self):
+        """The attached residual-bias layer, or ``None``."""
+        return self._residual
+
     def predict(self, times: Sequence[datetime], z: float = _Z95,
                  kernel: str = "numpy") -> Prediction:
-        """Predict ``height ±`` band at ``times`` (95% prediction interval)."""
+        """Predict ``height ±`` band at ``times`` (95% prediction interval).
+
+        When a residual-bias layer is attached (:meth:`attach_residual`), the
+        learned day-of-year correction is applied to the mean (and the band is
+        conformally rescaled) before returning.
+        """
         times = list(times)
         A = _basis_matrix(self._constituents, times, kernel=kernel)
         mean = A @ self._coef
         var_mean = np.maximum(np.einsum("ij,jk,ik->i", A, self._covariance, A), 0.0)
         se = np.sqrt(var_mean)
         half = z * np.sqrt(var_mean + self._sigma2)
-        return Prediction(mean=mean, lower=mean - half, upper=mean + half, se=se)
+        pred = Prediction(mean=mean, lower=mean - half, upper=mean + half, se=se)
+        if self._residual is not None:
+            pred = self._residual.apply(pred, times)
+        return pred
 
     def constituents(self) -> list[Fit]:
         """Fitted harmonic constants (name, amplitude, phase°, σ)."""

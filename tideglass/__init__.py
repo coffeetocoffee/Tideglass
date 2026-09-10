@@ -83,6 +83,7 @@ from tideglass.marea.plugins import (
 )
 from tideglass.marea.pooling import HierarchicalPool, PooledConstituent
 from tideglass.marea.qc import QcConfig, QcReport, clean_series, qc_check
+from tideglass.marea.residual import ResidualModel, learn_residual
 from tideglass.marea.tpxo import (
     format_self_check,
     native_to_model,
@@ -91,6 +92,7 @@ from tideglass.marea.tpxo import (
     tpxo_model_at,
 )
 from tideglass.marea.transfer import ResponseTransfer, TransferCoefficients
+from tideglass.marea.federation import TrustLedger
 from tideglass.marine.advisor import Advice, TideAdvisor
 from tideglass.marine.alerting import StationWatch, surge_events
 from tideglass.tui import build_dashboard
@@ -119,6 +121,7 @@ __all__ = [
     "TideAdvisor",
     "TideModel",
     "TransferCoefficients",
+    "TrustLedger",
     "UpdateLog",
     "add_harmonic_file",
     "all_constituents",
@@ -152,6 +155,7 @@ __all__ = [
     "joint_exceedance_probability",
     "krige_field",
     "krige_regional",
+    "learn_residual",
     "list_packs",
     "list_regions",
     "load_pack_dir",
@@ -173,6 +177,7 @@ __all__ = [
     "register_constituent",
     "register_pack",
     "reliability_curve",
+    "ResidualModel",
     "rerun",
     "run_server",
     "self_check_tpxo",

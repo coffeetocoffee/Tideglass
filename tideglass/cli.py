@@ -631,9 +631,49 @@ def cmd_federate(args) -> int:
                 - rep.network_before["gain_total_explained"])
         print(f"network-effect gain: {gain:+.4f} explained variance "
               f"({rep.network_before['n_total']} -> {rep.network_after['n_total']} gauges)")
+    if rep.trust is not None:
+        print(f"trust: {rep.trust:.3f} (QC reputation; low trust down-weights "
+              "the sensor in the pool)")
     if rep.improved:
         print(f"improved model saved: {os.path.join(fed.store.root, args.station + '.json')}")
     return 0 if rep.qc.passed else 2
+
+
+def cmd_correct(args) -> int:
+    import numpy as np
+
+    from tideglass.marea.residual import learn_residual
+
+    try:
+        times, heights = read_csv(args.csv)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass correct: {exc}", file=sys.stderr)
+        return 2
+    model = _load_station(args.store, args.station)
+    if model is None:
+        return 2
+    try:
+        rm, diag = learn_residual(
+            model, times, heights, bins=args.bins,
+            holdout=args.holdout, alpha=args.alpha)
+    except ValueError as exc:
+        print(f"tideglass correct: {exc}", file=sys.stderr)
+        return 2
+    model.attach_residual(rm)
+    path = os.path.join(args.store, f"{args.station}.json")
+    with open(path, "w") as fh:
+        json.dump(model.to_artifact(), fh, indent=2)
+    print(f"station: {args.station}  n: {diag['n']}  bins: {diag['bins']} "
+          f"(day-of-year climatology)")
+    print(f"max |bias|: {diag['max_abs_bias']:.4f} m")
+    print(f"rmse: {diag['rmse_before']:.4f} -> {diag['rmse_after']:.4f} m "
+          f"(held-out tail, n={diag['n_test']})")
+    if diag.get("coverage_after") is not None:
+        print(f"coverage: {diag['coverage_before']:.4f} -> "
+              f"{diag['coverage_after']:.4f} "
+              f"(conformal q={diag['conformal_q']:.3f})")
+    print(f"saved: {path} (bias table applied by every predict)")
+    return 0
 
 
 def cmd_validate(args) -> int:
@@ -1058,6 +1098,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--out", default=None,
                        help="write markdown to a file (default: stdout)")
     p_rep.set_defaults(func=cmd_report)
+
+    p_corr = sub.add_parser(
+        "correct",
+        help="learn a station's residual bias table and attach it to the model")
+    p_corr.add_argument("csv", help="CSV with time,height rows (recent record)")
+    p_corr.add_argument("--station", default=None,
+                        help="station name (default: CSV stem)")
+    p_corr.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
+    p_corr.add_argument("--bins", type=int, default=12,
+                        help="day-of-year climatology bins (12 = monthly)")
+    p_corr.add_argument("--holdout", type=float, default=0.25,
+                        help="chronological tail fraction for scoring")
+    p_corr.add_argument("--alpha", type=float, default=0.05,
+                        help="conformal miscoverage level for the corrected band")
+    p_corr.set_defaults(func=cmd_correct)
 
     p_plug = sub.add_parser(
         "plugins", help="list constituent packs (builtin + user JSON packs)")
