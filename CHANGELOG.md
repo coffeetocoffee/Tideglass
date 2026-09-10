@@ -36,6 +36,28 @@ All notable changes to Tideglass are documented here. The format is based on
 - Top-level exports (additive, contract stays `1.0`): `MetResponse`,
   `SurgeForecast`, `learn_met_response`.
 
+### Added — v1.3 "Accountability + regime-aware uncertainty"
+- **Decision ledger** (`marea/ledger.py`) — every priced act/wait decision
+  (from a `DecisionCurve`) is logged with its probability, action, and
+  economics; realized water levels are recorded later and reconciled.
+  `LedgerReport` reports the **realized cost vs the always-act and never-act
+  baselines** — "the forecast earned X" in the operator's currency — plus event
+  recall / action precision, turning the advisor into an auditable, B2B-grade
+  system. Persists as `<station>.ledger.json`; CLI `tideglass ledger
+  <station> [--outcome o.csv]` audits, and `advise ... --ledger PATH` writes
+  each advisory's priced decision into the ledger.
+- **Regime-conditional calibration** (`marea/regimes.py`) — the single
+  conformal quantile is stratified by regime so each band uses the quantile of
+  *its own* error distribution and widens exactly when it should. **spring/neap**
+  is read from the local predicted tidal range (the M2/S2 fortnightly envelope);
+  **storm/non-storm** from the residual (or, at forecast time, the v1.2
+  met-forced surge). `learn_regime_calibration` fits per-regime conformal
+  quantiles; `RegimeCalibration.apply` rescales a prediction's band per time.
+  Persists as `<station>.regimes.json`; `tideglass calibrate --regimes` learns
+  and saves it.
+- Top-level exports (additive, contract stays `1.0`): `DecisionLedger`,
+  `RegimeCalibration`, `learn_regime_calibration`.
+
 ### Added — v1.1 "The engine that learns"
 - `marea/residual.py` — **residual memory**: a learned day-of-year bias table
   (`learn_residual` → `ResidualModel`) fitted to post-harmonic residuals with

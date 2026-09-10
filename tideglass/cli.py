@@ -239,6 +239,30 @@ def cmd_calibrate(args) -> int:
         zip(attr["names"], attr["share"]), key=lambda kv: -kv[1]
     ):
         print(f"  {name:<5} {share:7.4f}")
+
+    if args.regimes:
+        from tideglass.marea.regimes import learn_regime_calibration
+
+        # Learn from the whole concurrent record so both regimes are populated.
+        full_t = list(times[:-(n_test + n_calib)]) + list(calib_t) + list(test_t)
+        full_y = np.concatenate([train_y, calib_y, test_y])
+        rc = learn_regime_calibration(model, full_t, full_y,
+                                      alpha=args.alpha_level)
+        print(f"\nregime-conditional calibration (1-a={1.0 - args.alpha_level:.2f}):")
+        print(f"  spring/neap range median: {rc.spring_range_median:.3f} m")
+        print(f"  storm |residual| threshold: {rc.storm_resid_q:.3f} m")
+        print(f"  default q: {rc.default_q:.4f}")
+        for label in ("neap", "spring", "neap_storm", "spring_storm"):
+            if label in rc.regimes:
+                cov = rc.coverage.get(label)
+                cov_s = f"{cov:.4f}" if cov is not None else "n/a"
+                print(f"  {label:<13} q={rc.regimes[label]:.4f}  "
+                      f"coverage={cov_s}")
+        os.makedirs(args.store, exist_ok=True)
+        rpath = os.path.join(args.store, f"{station}.regimes.json")
+        with open(rpath, "w") as fh:
+            json.dump(rc.to_dict(), fh, indent=2)
+        print(f"saved: {rpath}")
     return 0
 
 
@@ -402,11 +426,23 @@ def cmd_advise(args) -> int:
               "threshold the decision prices)", file=sys.stderr)
         return 2
     times = [day + timedelta(hours=h) for h in range(args.days * 24)]
-    print(TideAdvisor(model).advise(
+    advice = TideAdvisor(model).advise(
         times, flood_threshold_m=args.flood,
         surge_sigma_m=args.surge_sigma,
         decision_threshold_m=args.flood,
-        cost=args.cost, loss=args.loss).summary)
+        cost=args.cost, loss=args.loss)
+    print(advice.summary)
+
+    if args.ledger and advice.decision is not None:
+        from tideglass.marea.ledger import DecisionLedger
+
+        ledger = (DecisionLedger.load(args.ledger)
+                  if os.path.exists(args.ledger) else DecisionLedger())
+        ledger.log_curve(advice.decision, args.cost, args.loss)
+        os.makedirs(os.path.dirname(os.path.abspath(args.ledger)), exist_ok=True)
+        ledger.save(args.ledger)
+        rep = ledger.report()
+        print(f"ledger updated: {rep.n_decisions} decision(s) logged")
     return 0
 
 
@@ -1070,7 +1106,11 @@ def build_parser() -> argparse.ArgumentParser:
                             "(chronological middle)")
     p_cal.add_argument("--alpha", type=float, default=0.05, help="selection significance")
     p_cal.add_argument("--alpha-level", type=float, default=0.05,
-                       help="conformal miscoverage level (bands cover 1-alpha)")
+                        help="conformal miscoverage level (bands cover 1-alpha)")
+    p_cal.add_argument("--regimes", action="store_true",
+                       help="also learn per-regime (spring/neap, storm/non-storm) "
+                            "conformal quantiles and persist <station>.regimes.json")
+    p_cal.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
     p_cal.set_defaults(func=cmd_calibrate)
 
     p_adv = sub.add_parser("advise", help="harvesting + rip + species advice")
@@ -1088,9 +1128,13 @@ def build_parser() -> argparse.ArgumentParser:
                             "--loss, prices the act/wait decision policy "
                             "(requires --flood as the event threshold)")
     p_adv.add_argument("--loss", type=float, default=None,
-                       help="loss if the event hits an unprepared hour; with "
-                            "--cost, prices the act/wait decision policy "
-                            "(requires --flood as the event threshold)")
+                        help="loss if the event hits an unprepared hour; with "
+                             "--cost, prices the act/wait decision policy "
+                             "(requires --flood as the event threshold)")
+    p_adv.add_argument("--ledger", default=None,
+                       help="log the priced decision into a DecisionLedger JSON "
+                            "file (reconciled later with --outcome via the "
+                            "'ledger' command)")
     p_adv.set_defaults(func=cmd_advise)
 
     p_fetch = sub.add_parser("fetch", help="download NOAA CO-OPS gauge CSV")
@@ -1298,7 +1342,48 @@ def build_parser() -> argparse.ArgumentParser:
                               "with --cost, prices the act/wait decision "
                               "(needs --flood)")
     p_surge.set_defaults(func=cmd_surge)
+
+    p_ledger = sub.add_parser(
+        "ledger", help="audit priced decisions: report realized cost vs "
+                       "always/never baselines (v1.3)")
+    p_ledger.add_argument("station", help="station name")
+    p_ledger.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
+    p_ledger.add_argument("--outcome", default=None,
+                         help="outcomes CSV (time,height) to reconcile logged "
+                              "decisions against realized water levels")
+    p_ledger.add_argument("--json", action="store_true",
+                         help="emit the report as JSON")
+    p_ledger.set_defaults(func=cmd_ledger)
     return ap
+
+
+def cmd_ledger(args) -> int:
+    from tideglass.marea.ledger import DecisionLedger
+
+    path = os.path.join(args.store, f"{args.station}.ledger.json")
+    if not os.path.exists(path):
+        print(f"tideglass ledger: no ledger for station {args.station!r} "
+              f"(looked in {args.store!r})", file=sys.stderr)
+        return 2
+    ledger = DecisionLedger.load(path)
+    if args.outcome:
+        try:
+            otimes, olevels = read_csv(args.outcome)
+        except (OSError, ValueError) as exc:
+            print(f"tideglass ledger: {exc}", file=sys.stderr)
+            return 2
+        try:
+            ledger.record_outcomes(otimes, olevels)
+        except ValueError as exc:
+            print(f"tideglass ledger: {exc}", file=sys.stderr)
+            return 2
+        with open(path, "w") as fh:
+            json.dump(ledger.to_dict(), fh, indent=2)
+    if args.json:
+        print(json.dumps(ledger.report().__dict__, indent=2))
+    else:
+        print(ledger.report())
+    return 0
 
 
 def main(argv=None) -> int:

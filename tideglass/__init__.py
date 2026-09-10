@@ -70,6 +70,7 @@ from tideglass.marea.harmonics_db import (
 from tideglass.marea.kalman import JointModel
 from tideglass.marea.kernel import available_backends, basis_matrix
 from tideglass.marea.krige import KrigeField, krige_field, krige_regional
+from tideglass.marea.ledger import DecisionLedger
 from tideglass.marea.met import MetResponse, SurgeForecast, learn_met_response
 from tideglass.marea.model import Prediction, TideModel
 from tideglass.marea.nowcast import NowcastEngine, UpdateLog
@@ -85,6 +86,7 @@ from tideglass.marea.plugins import (
 )
 from tideglass.marea.pooling import HierarchicalPool, PooledConstituent
 from tideglass.marea.qc import QcConfig, QcReport, clean_series, qc_check
+from tideglass.marea.regimes import RegimeCalibration, learn_regime_calibration
 from tideglass.marea.residual import ResidualModel, learn_residual
 from tideglass.marea.tpxo import (
     format_self_check,
@@ -106,6 +108,7 @@ __all__ = [
     "Constituent",
     "CostLoss",
     "DecisionCurve",
+    "DecisionLedger",
     "FederatedRefit",
     "FederatedReport",
     "GaugeStore",
@@ -121,6 +124,7 @@ __all__ = [
     "Prediction",
     "QcConfig",
     "QcReport",
+    "RegimeCalibration",
     "ResidualModel",
     "ResponseTransfer",
     "SkewSurge",
@@ -161,6 +165,7 @@ __all__ = [
     "krige_field",
     "krige_regional",
     "learn_met_response",
+    "learn_regime_calibration",
     "learn_residual",
     "list_packs",
     "list_regions",
