@@ -51,8 +51,11 @@ pred = model.predict(future_times)      # mean / lower / upper
 print(TideAdvisor(model).advise(future_times).summary)
 ```
 
-`tideglass --help` lists all 23 subcommands — `smooth`, `calibrate`, `extremes`,
+`tideglass --help` lists all 24 subcommands — `smooth`, `calibrate`, `extremes`,
 `nowcast`, `poll`, `pool`, `federate`, `correct`, `export`, `serve`, `tui`, …
+Each `fit` also stores the model in a content-addressed, lineage-tracked store
+under `<store>/cas`, so `tideglass reproduce <hash>` verifies and rebuilds any
+past prediction bit-for-bit (auditable enough for insurers and port authorities).
 
 ## Measured proof
 

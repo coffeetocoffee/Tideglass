@@ -7,7 +7,7 @@ surface adds export feeds, a stdlib HTTP API, and a terminal dashboard.
 
 from tideglass import marea, marine
 
-__version__ = "2.1.1"
+__version__ = "2.2.0"
 from tideglass.marea.bench_global import compare, global_model_at, read_harmonic_grid
 from tideglass.marea.calibration import (
     conformal_quantile,
@@ -19,6 +19,7 @@ from tideglass.marea.calibration import (
     pit_values,
     reliability_curve,
 )
+from tideglass.marea.cas import ArtifactStore
 from tideglass.marea.constituents import (
     CATALOG,
     Constituent,
@@ -110,6 +111,7 @@ __all__ = [
     "CATALOG",
     "GPD",
     "Advice",
+    "ArtifactStore",
     "Constituent",
     "CostLoss",
     "DecisionCurve",

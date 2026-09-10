@@ -107,6 +107,13 @@ def cmd_fit(args) -> int:
     path = os.path.join(args.store, f"{station}.json")
     with open(path, "w") as fh:
         json.dump(model.to_artifact(), fh, indent=2)
+    # v2.2: also store content-addressed with full lineage, so any past model
+    # can be reproduced bit-for-bit via `tideglass reproduce <hash>`.
+    from tideglass.marea.cas import ArtifactStore
+
+    cas = ArtifactStore(os.path.join(args.store, "cas"),
+                        peer_dir=os.path.join(args.store, "federation"))
+    h = cas.store(model, station=station)
     prov = model.meta
     print(f"station: {station}")
     print(f"observations: {len(times)}  rmse: {model.meta['rmse']:.4f} m")
@@ -118,6 +125,10 @@ def cmd_fit(args) -> int:
     for f in model.constituents():
         print(f"  {f.name:<5} A={f.amplitude:.4f} m  kappa={f.phase_deg:7.2f} deg")
     print(f"saved: {path}")
+    li = cas.lineage_of(h) or {}
+    peers = li.get("peers", [])
+    print(f"cas: {h}  parent: {str(li.get('parent'))[:12] or '-'}  "
+          f"peers: {len(peers)}")
     return 0
 
 
@@ -141,6 +152,46 @@ def cmd_predict(args) -> int:
     print("# time height_m lower_m upper_m")
     for t, m, lo, hi in zip(times, pred.mean, pred.lower, pred.upper):
         print(f"{t.isoformat()} {m:.4f} {lo:.4f} {hi:.4f}")
+    return 0
+
+
+def cmd_reproduce(args) -> int:
+    from tideglass.marea.cas import ArtifactStore
+
+    cas = ArtifactStore(os.path.join(args.store, "cas"))
+    h = cas.resolve(args.hash)
+    if h is None:
+        print(f"tideglass reproduce: no artifact for hash {args.hash!r} "
+              f"in {cas.root!r}", file=sys.stderr)
+        return 2
+    if not cas.verify(h):
+        print(f"tideglass reproduce: {h} failed bit-for-bit verification "
+              f"(store corrupted or tampered)", file=sys.stderr)
+        return 2
+    li = cas.lineage_of(h) or {}
+    obs = li.get("obs") or {}
+    print(f"hash:     {h}")
+    print(f"station:  {cas.station_of(h)}")
+    print("verified: bit-for-bit (stored blob rehashes to key)")
+    print(f"lineage   obs: {obs.get('data_sha256')}  "
+          f"start: {obs.get('obs_start')}  end: {obs.get('obs_end')}")
+    print(f"          peers: {len(li.get('peers', []))}  "
+          f"parent: {str(li.get('parent')) or '-'}  "
+          f"source: {li.get('source')}")
+    if args.date:
+        try:
+            day = datetime.strptime(args.date, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc)
+        except ValueError:
+            print(f"tideglass reproduce: bad date {args.date!r} "
+                  f"(want YYYY-MM-DD)", file=sys.stderr)
+            return 2
+        times = [day + timedelta(hours=i) for i in range(args.days * 24)]
+        pred = cas.reproduce(h, times)
+        print("\n# rebuilt prediction (bit-for-bit from stored artifact)")
+        print("# time height_m lower_m upper_m")
+        for t, m, lo, hi in zip(times, pred.mean, pred.lower, pred.upper):
+            print(f"{t.isoformat()} {m:.4f} {lo:.4f} {hi:.4f}")
     return 0
 
 
@@ -1423,6 +1474,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_peers.add_argument("--holdout", type=float, default=0.25,
                         help="chronological tail fraction held out for scoring")
     p_peers.set_defaults(func=cmd_peers)
+
+    p_repro = sub.add_parser(
+        "reproduce",
+        help="rebuild a past prediction bit-for-bit from a content hash "
+             "(v2.2 reproducible artifact store)")
+    p_repro.add_argument(
+        "hash", help="content-address of a stored model artifact "
+                     "(full sha256 or unambiguous prefix)")
+    p_repro.add_argument("--store", default=DEFAULT_STORE,
+                        help="artifact directory (CAS store lives under "
+                             "<store>/cas)")
+    p_repro.add_argument("--date", default=None,
+                        help="YYYY-MM-DD (UTC) to rebuild an hourly prediction "
+                             "from; omit to print only the verified lineage")
+    p_repro.add_argument("--days", type=int, default=1,
+                        help="days from midnight to rebuild (with --date)")
+    p_repro.set_defaults(func=cmd_reproduce)
 
     p_pool = sub.add_parser(
         "pool", help="partially-pooled model for a short record "

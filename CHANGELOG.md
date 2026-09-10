@@ -6,6 +6,25 @@ All notable changes to Tideglass are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added — v2.2 "Reproducibility as a feature"
+- **Content-addressed artifact store** (`marea/cas.py`) — every fitted model is
+  now stored under a content address: the SHA-256 of its canonical record
+  (interoperable `to_artifact()` PLUS the exact `coef`/`covariance`/`sigma2`,
+  so a model can be rebuilt bit-for-bit — not through the polar amplitude/phase
+  `load_harmonic` round trip, which smears the coefficients). Re-fitting the
+  same data yields the same key (dedup); a stored blob cannot be altered
+  without its key changing. `ArtifactStore` records each station's full
+  **lineage** per refit: the observations that produced it (`data_sha256` from
+  the v0.6 provenance block) plus the peer bundles folded in (v2.1
+  `bundle_sha256`, auto-discovered from the federation dir) and the `parent`
+  hash, so the whole chain back to the first fit is traversable.
+- **`tideglass reproduce <hash>`** — verifies the stored blob re-hashes to its
+  key (tamper-evident), prints the obs/peer lineage, and rebuilds the hourly
+  prediction from that exact artifact (`--date`/`--days`); accepts a short
+  unique prefix like git SHAs. `tideglass fit` now prints `cas: <hash>` and
+  the parent/peer lineage after saving.
+- Top-level exports (additive, contract stays `1.0`): `ArtifactStore`.
+
 ### Added — v2.1 "The protocol grows teeth"
 - **Gossip + deltas** (`marea/federation.py`) — peers exchange bundle
   manifests and pull only changed stations: `content_digest` (an

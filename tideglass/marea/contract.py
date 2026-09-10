@@ -20,7 +20,7 @@ api_version = "1.0"
 # is irrelevant but the *set* is what is locked. It mirrors ``tideglass.__all__``
 # exactly — ``verify_public_api`` enforces that they never drift apart.
 PUBLIC_API: frozenset[str] = frozenset({
-    "GPD", "Advice", "CATALOG", "Constituent", "GaugeStore", "GlobalFederation",
+    "GPD", "Advice", "ArtifactStore", "CATALOG", "Constituent", "GaugeStore", "GlobalFederation",
     "HealthMonitor",
     "HealthReport", "HierarchicalPool", "JointModel", "KrigeField",
     "MetResponse", "NowcastEngine", "OpsReport", "PooledConstituent",

@@ -290,7 +290,7 @@ def _pkg_version() -> str:
 
         return version("tideglass")
     except (ImportError, OSError):
-        return "2.1.1"
+        return "2.2.0"
 
 
 def _alias(peer_id: str, name: str) -> str:

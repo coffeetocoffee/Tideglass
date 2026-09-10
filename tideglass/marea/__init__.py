@@ -4,6 +4,7 @@ from tideglass.marea import (
     astronomy,
     bench_global,
     calibration,
+    cas,
     constituents,
     crowdsource,
     drift,
@@ -31,6 +32,7 @@ from tideglass.marea.calibration import (
     crps_interval,
     evaluate_calibration,
 )
+from tideglass.marea.cas import ArtifactStore
 from tideglass.marea.crowdsource import GaugeStore
 from tideglass.marea.drift import HealthMonitor, HealthReport
 from tideglass.marea.kalman import JointFit, JointModel
@@ -53,6 +55,7 @@ from tideglass.marea.tpxo import (
 from tideglass.marea.transfer import ResponseTransfer, TransferCoefficients
 
 __all__ = [
+    "ArtifactStore",
     "DecisionLedger",
     "EOFResult",
     "Fit",
@@ -76,6 +79,7 @@ __all__ = [
     "bench_global",
     "calibration",
     "canonical_digest",
+    "cas",
     "cold_start",
     "compare",
     "constituent_attribution",
