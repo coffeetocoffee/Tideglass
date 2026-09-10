@@ -290,7 +290,7 @@ def _pkg_version() -> str:
 
         return version("tideglass")
     except (ImportError, OSError):
-        return "2.1.0"
+        return "2.1.1"
 
 
 def _alias(peer_id: str, name: str) -> str:
@@ -724,7 +724,7 @@ class GlobalFederation:
                 raise ValueError(f"{s}: {len(times)} times but {y.size} heights")
             if len(times) < 8:
                 raise ValueError(f"{s}: need >= 8 observations, got {len(times)}")
-            k = min(max(int(round(len(times) * (1.0 - holdout))), 4),
+            k = min(max(round(len(times) * (1.0 - holdout)), 4),
                     len(times) - 1)
             own = TideModel.fit(times[:k], y[:k], station=s)
             heads[s] = (times[k:], y[k:], own)
