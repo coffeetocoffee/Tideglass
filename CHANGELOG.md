@@ -6,6 +6,35 @@ All notable changes to Tideglass are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added — v2.1 "The protocol grows teeth"
+- **Gossip + deltas** (`marea/federation.py`) — peers exchange bundle
+  manifests and pull only changed stations: `content_digest` (an
+  alias-independent hash of one station's exported constants),
+  `PeerBundle.manifest()` (per-station digests + one `bundle_sha256`),
+  `PeerBundle.delta()` → `PeerDelta` (added/updated/removed/unchanged).
+  `GlobalFederation.ingest` returns the applied delta and skips rewriting the
+  stored bundle when it is empty. Bundles carry **lineage**
+  (`StationContribution.lineage`: `data_sha256`, the full refit `chain`,
+  `fitted_at` from the v0.6 provenance block), which round-trips through
+  save/load and is restored into federated models' `meta["lineage"]`.
+  CLI: `tideglass sync` prints the manifest digest; `tideglass merge` prints
+  each bundle's delta.
+- **Peer-level trust** — `GlobalFederation.peer_trust(local_obs)` scores each
+  peer by leave-one-peer-out validation: the regional prior induced by all
+  peers, and again with one peer removed, predicts your stations' held-out
+  tails. Poisoned peers (removal improves your error) decay Gaussian in the
+  relative worsening (floor 0.05); duplicated peers are penalized by their
+  redundant share, so two identical copies carry one copy's weight; stale
+  peers degrade like poisoned ones. Returns `PeerTrustScore` per peer;
+  `trust_weights()` expands scores into `HierarchicalPool` weights.
+  CLI: `tideglass peers --store DIR [--obs local.csv ...]`.
+- **Optional DP noise** — `dp_noisify(bundle, epsilon, delta, clip_m, seed)`
+  applies the calibrated Gaussian mechanism to every shared coefficient entry
+  (clip, then N(0, σ²) with σ = clip·√(2·ln(1.25/δ))/ε), recorded in bundle
+  `meta["dp"]`. CLI: `tideglass sync ... --epsilon E`.
+- Top-level exports (additive, contract stays `1.0`): `PeerDelta`,
+  `PeerTrustScore`, `dp_noisify`.
+
 ### Added — v1.2 "Surge becomes a real forecast"
 - `marea/met.py` — **met-forced surge response**, the last physics gap: surge
   was AR(1) — it decayed, it never predicted. `learn_met_response` regresses

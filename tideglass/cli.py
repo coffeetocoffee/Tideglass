@@ -705,23 +705,37 @@ def cmd_federate(args) -> int:
 
 
 def cmd_sync(args) -> int:
-    from tideglass.marea.federation import build_peer_bundle
+    from tideglass.marea.federation import build_peer_bundle, dp_noisify
 
     try:
         bundle = build_peer_bundle(args.store, args.peer_id)
     except (OSError, ValueError) as exc:
         print(f"tideglass sync: {exc}", file=sys.stderr)
         return 2
+    if args.epsilon is not None:
+        try:
+            bundle = dp_noisify(bundle, args.epsilon, delta=args.delta,
+                                clip_m=args.clip, seed=args.dp_seed)
+        except ValueError as exc:
+            print(f"tideglass sync: {exc}", file=sys.stderr)
+            return 2
+        dp = bundle.meta["dp"]
+        print(f"dp: Gaussian noise sigma {dp['sigma_m']:.4f} m on shared "
+              f"constants (epsilon {dp['epsilon']}, delta {dp['delta']}, "
+              f"clip {dp['clip_m']} m)")
     out = args.out or os.path.join(args.store, "peer_bundle.json")
     try:
         bundle.save(out)
     except OSError as exc:
         print(f"tideglass sync: {exc}", file=sys.stderr)
         return 2
+    mf = bundle.manifest()
     print(f"peer_id: {bundle.peer_id}  stations: {len(bundle.stations)}  "
           f"tideglass: {bundle.tideglass_version}")
     print("anonymized: station identities stay local; bundle carries "
           f"{len(bundle.stations)} one-way alias(es) only")
+    print(f"manifest: {mf['bundle_sha256'][:16]} "
+          f"({len(mf['stations'])} station digest(es))")
     print(f"saved: {out}")
     return 0
 
@@ -745,11 +759,16 @@ def cmd_merge(args) -> int:
             print(f"tideglass merge: skipping {p}: {exc}", file=sys.stderr)
             continue
         try:
-            fed.ingest(b)
+            d = fed.ingest(b)
         except ValueError as exc:
             print(f"tideglass merge: skipping {p}: {exc}", file=sys.stderr)
             continue
         n += 1
+        if d.is_empty:
+            print(f"  peer {d.peer_id}: unchanged (manifest matches; "
+                  "nothing pulled)")
+        else:
+            print(f"  {d}")
     rep = fed.report()
     print(f"merged: {n} peer bundle(s)")
     print(f"federation: {rep['n_peers']} peers, {rep['n_stations']} stations "
@@ -759,6 +778,46 @@ def cmd_merge(args) -> int:
         print(f"residual stats: mean rmse {resid['mean_rmse']:.4f} m "
               f"over {resid['n']} station(s)")
     print(f"saved: {fed.peers_dir}")
+    return 0
+
+
+def cmd_peers(args) -> int:
+    from tideglass.marea.federation import GlobalFederation
+
+    root = os.path.join(args.store, "federation")
+    if not os.path.isdir(os.path.join(root, "peers")):
+        print(f"tideglass peers: no federation store under {root!r} "
+              "(merge a peer bundle first)", file=sys.stderr)
+        return 2
+    fed = GlobalFederation(root)
+    print(f"federation: {fed.n_peers} peer(s), {fed.n_stations} station(s)")
+    for pid, b in fed.bundles().items():
+        n_lin = sum(1 for c in b.stations.values()
+                    if c.lineage and c.lineage.get("data_sha256"))
+        mf = b.manifest()
+        print(f"peer {pid}: {len(b.stations)} station(s), "
+              f"generated {b.generated_at}")
+        print(f"  manifest: {mf['bundle_sha256'][:16]}  lineage: {n_lin}/"
+              f"{len(b.stations)} station(s) carry data_sha256")
+    if args.obs:
+        local_obs = {}
+        try:
+            for p in args.obs:
+                times, heights = read_csv(p)
+                key = os.path.splitext(os.path.basename(p))[0]
+                local_obs[key] = (times, heights)
+        except (OSError, ValueError) as exc:
+            print(f"tideglass peers: {exc}", file=sys.stderr)
+            return 2
+        try:
+            scores = fed.peer_trust(local_obs, holdout=args.holdout)
+        except ValueError as exc:
+            print(f"tideglass peers: {exc}", file=sys.stderr)
+            return 2
+        print("peer trust (leave-one-peer-out vs held-out local observations):")
+        for pid, s in scores.items():
+            print(f"  {s} -> "
+                  f"{'trusted' if s.trust >= 0.5 else 'down-weighted'}")
     return 0
 
 
@@ -1334,6 +1393,16 @@ def build_parser() -> argparse.ArgumentParser:
                        help="this installation's federation peer id")
     p_sync.add_argument("--out", default=None,
                        help="bundle JSON path (default: <store>/peer_bundle.json)")
+    p_sync.add_argument("--epsilon", type=float, default=None,
+                       help="apply calibrated DP noise to the shared constants "
+                            "(Gaussian mechanism; e.g. 1.0)")
+    p_sync.add_argument("--delta", type=float, default=1e-5,
+                       help="DP delta (default 1e-5)")
+    p_sync.add_argument("--clip", type=float, default=5.0,
+                       help="per-entry sensitivity bound in m applied before "
+                            "the noise")
+    p_sync.add_argument("--dp-seed", type=int, default=None,
+                       help="seed for reproducible noise")
     p_sync.set_defaults(func=cmd_sync)
 
     p_merge = sub.add_parser(
@@ -1342,6 +1411,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_merge.add_argument("bundle", nargs="+",
                         help="peer bundle JSON file(s) or director(y/ies) of them")
     p_merge.set_defaults(func=cmd_merge)
+
+    p_peers = sub.add_parser(
+        "peers", help="list federated peers; score their trust against your "
+                      "own observations (v2.1)")
+    p_peers.add_argument("--store", default=DEFAULT_STORE,
+                        help="artifact directory holding federation/")
+    p_peers.add_argument("--obs", nargs="*", default=None,
+                        help="local observation CSV(s) (time,height); enables "
+                             "leave-one-peer-out trust scoring")
+    p_peers.add_argument("--holdout", type=float, default=0.25,
+                        help="chronological tail fraction held out for scoring")
+    p_peers.set_defaults(func=cmd_peers)
 
     p_pool = sub.add_parser(
         "pool", help="partially-pooled model for a short record "
