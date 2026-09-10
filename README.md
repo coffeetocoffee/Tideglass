@@ -1,32 +1,27 @@
 # Tideglass
 
 A tide + marine-life intelligence engine. The **math core (Marea Core)** is the
-real product; the marine layer is a thin, well-fed consumer of
-`predict(height, time) ± σ`.
+product; the marine layer (advice, harvesting, rip risk) is a thin consumer of
+`predict(time) → height ± σ`.
 
-Marea Core beats `pytides` where it matters: exact linear solve instead of
-nonlinear `leastsq`, automatic DCDM constituent selection with F-test
-stopping, covariance-based prediction intervals, a dynamic astronomical
-kernel valid at any epoch, surge decomposition, and multi-station EOF
-harmonization. v0.3 adds the engine depth: a **joint Kalman smoother** over
-harmonics + secular trend + surge (replacing fit-then-decompose), **proper
-scoring (CRPS)** calibration with per-constituent error attribution, and
-**gridded regional assimilation** of the EOF field. v0.4 adds the **product
-surface**: an HTTP API, a terminal dashboard, feed exports (CSV/JSON/XTide/
-  NetCDF3), and marine depth (region rulesets, wave-coupled rip, surge alerts).
+## Why not just pytides?
 
-v0.5 is the ambition tier: a **crowd-sourced gauge network** (`GaugeStore`)
-where every cheap-sensor upload improves the shared EOF regional field — a real
-network effect — plus **global coastal coverage** from public harmonic databases
-(`harmonics_db`, benchmarked per region) and a published **validation write-up**
-(`VALIDATION.md`) with bench tables vs `pytides` and `UTide`.
+Marea Core beats `pytides` on the same public gauge data — exact linear solve
+instead of nonlinear `leastsq`, automatic constituent selection, honest
+uncertainty, and an engine that *learns*:
 
-v0.9 locks in the ecosystem: an **optional fused Numba kernel** (numerically
-identical to the numpy reference, which remains the default and the only hard
-dependency), a **frozen public API** (`api_version = "1.0"`, CI-enforced), and
-**plugin constituent packs** (rivers, Great Lakes, solid-earth — load your own
-JSON packs). And the proof: `GLOBAL_VALIDATION.md`, the one-page report every
-region, every source has to answer to (`tideglass report`).
+- **Exact solver** — SVD least-squares with full covariance; prediction
+  intervals from parameter + residual variance
+- **Automatic constituent selection** — DCDM greedy orthogonal selection with
+  F-test stopping; no hand-picked harmonic sets
+- **Dynamic astronomy** — Doodson arguments + nodal factors (Schureman SP-98),
+  valid at any epoch
+- **It learns** — a day-of-year residual bias layer conformalized on held-out
+  data, plus trust-weighted pooling over a crowd-sourced sensor network
+- **Real uncertainty** — CRPS/PIT calibration, conformal bands, GPD extreme
+  return levels, cost-loss-priced decisions
+- **Beyond single stations** — joint Kalman tide+surge+trend smoothing, kriged
+  regional fields, response-function transfer, genuine TPXO/FES ingestion
 
 ## Install
 
@@ -36,201 +31,60 @@ pip install -e .
 pip install pytides
 ```
 
-Requires Python ≥ 3.10 and numpy. `pytides` 0.0.4 is unmaintained and broken
-on Python 3.12; `bench` applies minimal runtime shims purely to run the
-head-to-head comparison.
+Requires Python ≥ 3.10 and numpy (the only hard dependency).
 
 ## Quickstart
 
 ```bash
-# Fit a model from gauge observations (time,height CSV, ISO datetimes, metres)
 tideglass fit data/noaa_9414290_20240101_20240301.csv --station SF
-
-# Height curve with 95% bands
-tideglass predict SF 2024-02-01
-
-# Benchmark against pytides on held-out data
+tideglass predict SF 2024-02-01          # hourly curve with 95% bands
 tideglass bench data/noaa_9414290_20240101_20240301.csv --station SF
-
-# Marine advice: harvest windows, rip risk, species exposure
-tideglass advise SF 2024-02-01
-
-# Joint tide + surge + secular-trend smoothing (v0.3)
-tideglass smooth data/noaa_9414290_20240101_20240301.csv --station SF
-
-# Uncertainty calibration: CRPS + coverage + per-constituent variance shares
-tideglass calibrate data/noaa_9414290_20240101_20240301.csv --station SF
-```  # (v0.8: + PIT + reliability curve + split-conformal bands)
-
-```bash
-# v0.8 — uncertainty as the product: pooling, extremes, calibration
-tideglass pool short.csv --station pier07 --store .tideglass  # borrow strength
-tideglass extremes gauge3yr.csv --station SF --flood 2.5      # GPD return levels
-```
-
-# v0.4 — product surface
-tideglass export SF 2024-02-01 --format netcdf --out sf.nc   # CSV/JSON/XTide/NetCDF
-tideglass tui SF 2024-02-01                                 # terminal dashboard
-tideglass alert data/noaa_9414290_20240101_20240301.csv --station SF --threshold 0.5
-tideglass serve --host 127.0.0.1 --port 8000               # GET /predict, /advise
-```
-
-```bash
-# v0.5 — crowd-sourced gauges + global coverage
-tideglass contribute upload.csv -122.34 47.60 --station pier07   # cheap-sensor upload
-tideglass network                                             # the network effect
-tideglass validate                                            # coverage + per-region bench
-```
-
-```bash
-# v0.6 — operational core: nowcast, drift watch, auto-refit
-tideglass fit train.csv --station SF --source noaa-coops:9414290  # provenance pinned
-tideglass nowcast SF feed.csv --hours 24        # assimilate + health + refit if stale
-tideglass poll 9414290 --repeat 24 --sleep-s 3600  # live loop: fetch, nowcast, refit
-```
-
-```bash
-# v0.7 — spatial moat: kriging fields, transfer, global-model bench
-# regional_field() now kriges EOF loadings -> field + field_var (GP uncertainty)
-# response-function transfer seeds short-record stations from a reference port
-tideglass bench data/noaa_9414290_20240101_20240301.csv --station SF \
-    --against tpxo --global-model data/grids/tpxo_sample.csv --lon -122.47 --lat 37.81
-# v0.7.1 — genuine TPXO/FES files (register at tpxo.net / aviso.altimetry.fr;
-# free for research, no redistribution — download the elevation file yourself):
-tideglass bench data/noaa_9414290_20240101_20240301.csv --station SF \
-    --against tpxo --global-model h_tpxo9.v1.nc --lon -122.47 --lat 37.81
+tideglass advise SF 2024-02-01           # harvest windows, rip risk, species
 ```
 
 ```python
-from tideglass import TideModel, TideAdvisor, JointModel, build_dashboard
-from tideglass import NowcastEngine, HealthMonitor, rerun  # v0.6: operations
-from tideglass import ResponseTransfer, krige_regional, global_model_at  # v0.7
-from tideglass import read_tpxo, tpxo_model_at  # v0.7.1: genuine TPXO/FES
-from tideglass import self_check_tpxo, format_self_check
-from tideglass import HierarchicalPool, fit_gpd  # v0.8: uncertainty as product
-from tideglass import reliability_curve, conformalize, flood_probability
-from tideglass.marea import export as EX
+from tideglass import TideModel, TideAdvisor
 
-model = TideModel.fit(times, heights)          # auto-selects constituents
-pred = model.predict(future_times)             # mean / lower / upper
+model = TideModel.fit(times, heights)   # auto-selects constituents
+pred = model.predict(future_times)      # mean / lower / upper
 
-# v0.6: live assimilation + drift watch (no batch refit)
-eng = NowcastEngine(model)
-eng.update(new_times, new_heights)              # recursive Kalman update
-rep = rerun("SF", list(zip(new_times, new_heights)), store=".tideglass")
-print(rep.health)                               # ok, or REFIT + auto-refit applied
-
-# v0.7: gridded field with uncertainty + short-record transfer
-field = regional_field(eof, coords, grid_lons, grid_lats)  # kriging default
-#   field.field (grid x time), field.field_var (GP kriging variance)
-tgt = ResponseTransfer(ref_model, ref_coords, neighbors, tgt_coords
-                       ).refine(short_times, short_heights)
-
-# v0.7.1: genuine global model at a gauge + pipeline self-check
-glob = tpxo_model_at("h_tpxo9.v1.nc", -122.47, 37.81)  # nearest water point
-print(format_self_check(self_check_tpxo(                      # vs NOAA pub.
-    "h_tpxo9.v1.nc", -122.47, 37.81, "US West Coast", "San Francisco")))
-
-# v0.8: uncertainty as the product — pooling, extremes, calibration
-short = HierarchicalPool(network_models).seed_short(         # borrow strength
-    short_times, short_heights, "pier07")      # shrinkage in .meta
-gpd = fit_gpd(declustered_skew_surges, threshold=0.13)        # POT tail
-print(gpd.return_level(100.0, rate_per_year=17.0))            # 100-yr level
-print(reliability_curve(pred, held_out)["empirical"])        # ≈ nominal
-lo, hi, q = conformalize(pred.mean, sig, cal.mean, cal_sig, cal_y)
-print(TideAdvisor(model).advise(
-    future_times, flood_threshold_m=2.5).summary)  # probabilistic threshold
-
-# v0.9: ecosystem lock-in — speed, plugin packs, frozen API, one-page proof
-from tideglass import (available_backends, register_pack, load_pack_dir,
-                       find, api_version, verify_public_api)
-fast = TideModel.fit(times, heights, kernel="numba")   # JIT kernel (opt-in;
-                                      # numpy remains the default & fallback)
-register_pack("my_coast", [Constituent("LOCAL1", (4, 0, 0, 0, 0, 0))])
-find("LOCAL1")                        # plugin constituents are first-class
-load_pack_dir("packs/")               # or drop JSON packs in a directory
-print(api_version)                    # "1.0" — the public API is frozen
-verify_public_api()                   # CI-enforced contract check
-# tideglass report → GLOBAL_VALIDATION.md: every region, every source,
-# one page (coverage + per-region tables + bench + GPD return levels)
-
-# v0.3: estimate tide + surge + secular trend jointly
-joint = JointModel.fit(times, heights)
-print(joint.fit_result.trend_mm_yr)            # e.g. +3.12 mm/yr ± 0.40
 print(TideAdvisor(model).advise(future_times).summary)
-
-# v0.4: feeds + dashboard
-EX.write_netcdf(model, future_times, "sf.nc")  # dependency-free NetCDF3
-print(build_dashboard(model, future_times))
 ```
 
-## Measured proof (NOAA San Francisco 9414290, held-out tail)
+`tideglass --help` lists all 23 subcommands — `smooth`, `calibrate`, `extremes`,
+`nowcast`, `poll`, `pool`, `federate`, `correct`, `export`, `serve`, `tui`, …
 
-Winter 2024, storm season (41 d train / 14 d test):
+## Measured proof
 
-| model   | rmse(m) | peak_err | coverage |
-|---------|---------|----------|----------|
-| marea   | 0.1267  | 0.1004   | 0.9668   |
-| pytides | 0.7770  | 0.6693   | n/a      |
+NOAA San Francisco 9414290, held-out tail (marea vs pytides):
 
-Summer 2024, calmer spell (28 d train / 10 d test):
+| record                | marea rmse (m) | pytides rmse (m) | coverage |
+|-----------------------|---------------:|-----------------:|---------:|
+| winter 2024 (storms)  | **0.1267**     | 0.7770           | 0.9668   |
+| summer 2024 (calm)    | **0.0869**     | 0.2606           | 0.7588   |
 
-| model   | rmse(m) | peak_err | coverage |
-|---------|---------|----------|----------|
-| marea   | 0.0869  | 0.0618   | 0.7588   |
-| pytides | 0.2606  | 0.1592   | n/a      |
+Coverage dips below nominal when genuine non-tidal variance (storm setup)
+exceeds the training residual — that signal belongs to the surge model, not
+the harmonic engine. Full details: `VALIDATION.md`, `GLOBAL_VALIDATION.md`.
 
-Coverage dips below nominal when genuine non-tidal variance (storm setup,
-upwelling anomalies) exceeds the training residual — that signal belongs to
-`surge.decompose`, not the harmonic engine.
-
-## Layout
+## What's inside
 
 ```
 tideglass/
-├── marea/            # math engine (no marine imports)
-│   ├── astronomy.py  # Doodson kernel + nodal factors (Schureman SP-98)
-│   ├── constituents.py
-│   ├── solver.py     # exact SVD least-squares + covariance
-│   ├── selection.py  # DCDM + F-test + Rayleigh gate
-│   ├── model.py      # TideModel: fit / predict / load_harmonic
-│   ├── metrics.py    # rmse / peak error / coverage
-│   ├── surge.py      # residual decomposition + AR(1) tracker
-│   ├── kalman.py     # v0.3: joint tide+surge+trend state-space smoother
-│   ├── calibration.py # v0.3: CRPS + coverage + per-constituent attribution
-│   ├── export.py      # v0.4: CSV/JSON/XTide/NetCDF3 feed adapters
-│   ├── spatial.py    # multi-station EOF harmonization + gridded field
-│   ├── crowdsource.py # v0.5: crowd-sourced gauge network (network effect)
-│   ├── harmonics_db.py # v0.5: global coverage from public harmonic databases
-│   ├── nowcast.py    # v0.6: recursive Kalman assimilation + AR(1) surge nowcast
-│   ├── drift.py      # v0.6: rolling coverage/RMSE/bias monitor + refit trigger
-│   ├── provenance.py # v0.6: obs window + source + sha256 pinned in artifacts
-│   ├── ops.py        # v0.6: cold_start / rerun / poll operational flywheel
-│   ├── krige.py      # v0.7: ordinary-kriging / GP spatial harmonics + variance
-│   ├── transfer.py   # v0.7: response-function transfer from reference ports
-│   ├── bench_global.py # v0.7: benchmark vs TPXO/FES-style global grids
-│   ├── tpxo.py       # v0.7.1: genuine TPXO/FES NetCDF3 ingestion + self-check
-│   ├── pooling.py    # v0.8: hierarchical partial pooling across the network
-│   ├── extremes.py   # v0.8: skew-surge + GPD return levels + joint exceedance
-│   ├── kernel.py     # v0.9: optional fused Numba kernel (numpy reference)
-│   ├── contract.py   # v0.9: frozen public API (PUBLIC_API + api_version)
-│   ├── plugins.py    # v0.9: plugin constituent packs (rivers/lakes/solid-earth)
-│   ├── report.py     # v0.9: one-page global validation report
-├── marine/           # domain layer (consumes predict() only)
-│   ├── knowledge.py / species.py / harvesting.py / rip.py / advisor.py
-│   └── alerting.py   # v0.4: surge-event alerts for watched stations
-├── web.py            # v0.4: stdlib HTTP API (GET /predict, /advise)
-├── tui.py            # v0.4: terminal dashboard
-├── cli.py            # fit / predict / bench / advise / smooth / calibrate /
-│                     #   export / serve / tui / alert / contribute / network /
-│                     #   validate / nowcast / poll / pool / extremes (v0.8) /
-│                     #   report / plugins (v0.9)
-GLOBAL_VALIDATION.md  # v0.9: the one-page proof — regenerate: tideglass report
-data/                 # sample NOAA gauge CSVs (SF 9414290); grids/ has the
-│                     #   TPXO-style harmonic-grid stand-in (tpxo_sample.csv)
+├── marea/                  # math engine (numpy-only, no marine imports)
+│   ├── astronomy / constituents / solver / selection / model
+│   ├── kalman / surge / nowcast / ops / drift / provenance
+│   ├── spatial / krige / transfer / crowdsource / pooling
+│   ├── calibration / extremes / metrics / residual / federation / decision
+│   ├── qc / kernel / contract / plugins / report
+│   └── export / tpxo / bench_global / harmonics_db
+├── marine/                 # thin consumer: advisor, harvesting, rip, species
+├── cli.py · web.py · tui.py · fetch.py
+data/                       # sample NOAA gauge CSVs (SF 9414290)
+GLOBAL_VALIDATION.md        # regenerate: tideglass report
 ```
 
-See `architecture.md` for module boundaries and math, `MVP.md` for the build
+`architecture.md` covers module boundaries and math; `MVP.md` is the build
 record with acceptance criteria.
 
 ## Testing
@@ -242,8 +96,7 @@ python -m pytest tests -q
 
 ## License & credits
 
-- Marea Core: MIT. Marine ruleset: CC0-style defaults (tune locally).
-- Astronomical basis: Schureman, *Special Publication 98*; Meeus,
-  *Astronomical Algorithms*; IERS conventions.
-- Gauge data: NOAA CO-OPS (San Francisco station 9414290).
+- Marea Core: MIT. Marine rulesets: CC0-style defaults (tune locally).
+- Astronomical basis: Schureman, *Special Publication 98*; IERS conventions.
+- Gauge data: NOAA CO-OPS (San Francisco 9414290).
 - Inspired by (and benchmarked against) `sam-cox/pytides`.
