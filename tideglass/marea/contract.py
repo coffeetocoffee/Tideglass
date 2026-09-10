@@ -41,7 +41,7 @@ PUBLIC_API: frozenset[str] = frozenset({
     "reliability_curve", "ResidualModel", "learn_residual", "rerun",
     "run_server", "self_check_tpxo", "skew_surge",
     "speed", "stations_in_region", "surge_events", "to_json", "to_xtide",
-    "tpxo_model_at", "TransferCoefficients", "TrustLedger",
+    "tpxo_model_at", "TrustLedger",
     "verify_public_api", "write_csv", "write_json",
     "write_netcdf", "write_xtide", "clean_series",
 })

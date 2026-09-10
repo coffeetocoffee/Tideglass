@@ -640,7 +640,6 @@ def cmd_federate(args) -> int:
 
 
 def cmd_correct(args) -> int:
-    import numpy as np
 
     from tideglass.marea.residual import learn_residual
 

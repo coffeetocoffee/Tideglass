@@ -104,7 +104,7 @@ class ResidualModel:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "ResidualModel":
+    def from_dict(cls, d: dict) -> ResidualModel:
         return cls(
             bins=int(d["bins"]),
             biases=np.asarray(d["biases"], dtype=float),
@@ -189,7 +189,7 @@ def learn_residual(
 
     # -- conformal tail + diagnostics --------------------------------------
     n_test = max(24, round(y.size * holdout))
-    head_t, tail_t = times[:-n_test], times[-n_test:]
+    tail_t = times[-n_test:]
     head_idx = slice(0, y.size - n_test)
     head_biases = np.zeros(bins)
     head_counts = np.zeros(bins, dtype=int)
