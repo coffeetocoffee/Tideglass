@@ -7,14 +7,20 @@
                  [--global-model PATH --lon X --lat Y [--consts M2,S2,...]]
                  (PATH may be a CSV grid or a genuine TPXO/FES NetCDF3 .nc file)
     tideglass advise <station> <date> [--store DIR] [--days N]
-                  [--flood M] [--surge-sigma S]
+                   [--flood M] [--surge-sigma S]
     tideglass fetch <station> <begin> <end> [--out CSV] [--datum D] [--interval I] [--met]
     tideglass surge <obs.csv> <met.csv> [--station S] [--store DIR] [--max-lag H]
-                  [--forecast MET.csv] [--hours H] [--flood M] [--cost C --loss L]
+                   [--forecast MET.csv] [--hours H] [--flood M] [--cost C --loss L]
     tideglass nowcast <station> <feed.csv> [--store DIR] [--alpha A]
-                 [--auto-refit | --no-auto-refit] [--hours H]
+                   [--auto-refit | --no-auto-refit] [--hours H]
     tideglass poll <station> [--store DIR] [--lookback-h H] [--repeat N]
-                 [--sleep-s S] [--datum D] [--alpha A] [--no-auto-refit]
+                   [--sleep-s S] [--datum D] [--alpha A] [--no-auto-refit]
+    tideglass loop [--store DIR] [--stations S1,S2] [--federation-root DIR]
+                   [--coords FILE] [--ledger DIR] [--peer-id ID] [--sleep-s S]
+                   [--max-passes N] [--seed-short-min N] [--coverage-target F]
+                   [--coverage-tol F] [--rmse-target F] [--rmse-tol F]
+                   [--datum D] [--alpha A] [--no-auto-refit]
+    tideglass slo [--store DIR] [--stations S1,S2] [--json]
     tideglass contribute <csv> <lon> <lat> --station NAME [--store DIR] [--source S]
     tideglass network [--store DIR] [--threshold F]
     tideglass validate [--region R]
@@ -22,11 +28,13 @@
 ``fit`` reads ``time,height`` rows (ISO-8601 datetimes, metres) and saves a
 model artifact; ``predict`` prints an hourly height curve with 95% bands;
 ``fetch`` downloads a gauge CSV directly from NOAA CO-OPS (``--met``: wind +
-pressure instead); ``surge`` learns the local wind/pressure → surge response
+pressure instead); ``surge`` learns the local wind/pressure -> surge response
 and forecasts surge from met forcing; ``nowcast``
 assimilates a fresh feed into the deployed model (with drift check and
 optional auto-refit); ``poll`` repeats that live against NOAA on a sleep loop;
-``pool`` fits a short record by borrowing strength from the network;
+``loop`` runs the v3.1 autonomous standing loop (refit + reseed + sync +
+SLO audit); ``slo`` reports per-station SLO compliance; ``pool`` fits a short
+record by borrowing strength from the network;
 ``extremes`` prints skew-surge stats, GPD return levels, and joint
 tide/surge exceedance; ``plugins`` lists constituent packs; ``report``
 renders the one-page global validation report.
@@ -49,6 +57,8 @@ from tideglass.marea.calibration import (
 from tideglass.marea.kalman import JointModel
 from tideglass.marea.metrics import evaluate, peak_tide_error, rmse
 from tideglass.marea.model import TideModel
+from tideglass.marea.ops import AutonomousLoop
+from tideglass.marea.slo import SloConfig, load_slo, save_slo
 from tideglass.marine.alerting import surge_events
 from tideglass.tui import build_dashboard
 from tideglass.web import run_server
@@ -93,7 +103,8 @@ def cmd_fit(args) -> int:
     source = args.source or f"csv:{args.csv}"
     try:
         model = TideModel.fit(
-            times, heights,
+            times,
+            heights,
             auto_select=not args.no_select,
             alpha=args.alpha,
             station=station,
@@ -111,24 +122,28 @@ def cmd_fit(args) -> int:
     # can be reproduced bit-for-bit via `tideglass reproduce <hash>`.
     from tideglass.marea.cas import ArtifactStore
 
-    cas = ArtifactStore(os.path.join(args.store, "cas"),
-                        peer_dir=os.path.join(args.store, "federation"))
+    cas = ArtifactStore(
+        os.path.join(args.store, "cas"), peer_dir=os.path.join(args.store, "federation")
+    )
     h = cas.store(model, station=station)
     prov = model.meta
     print(f"station: {station}")
     print(f"observations: {len(times)}  rmse: {model.meta['rmse']:.4f} m")
-    print(f"source: {prov.get('source')}  window: {prov.get('obs_start')} .. "
-          f"{prov.get('obs_end')}")
-    print(f"data_sha256: {prov.get('data_sha256')}  "
-          f"tideglass: {prov.get('tideglass_version')}")
+    print(
+        f"source: {prov.get('source')}  window: {prov.get('obs_start')} .. "
+        f"{prov.get('obs_end')}"
+    )
+    print(
+        f"data_sha256: {prov.get('data_sha256')}  "
+        f"tideglass: {prov.get('tideglass_version')}"
+    )
     print("constituents:")
     for f in model.constituents():
         print(f"  {f.name:<5} A={f.amplitude:.4f} m  kappa={f.phase_deg:7.2f} deg")
     print(f"saved: {path}")
     li = cas.lineage_of(h) or {}
     peers = li.get("peers", [])
-    print(f"cas: {h}  parent: {str(li.get('parent'))[:12] or '-'}  "
-          f"peers: {len(peers)}")
+    print(f"cas: {h}  parent: {str(li.get('parent'))[:12] or '-'}  peers: {len(peers)}")
     return 0
 
 
@@ -136,13 +151,18 @@ def cmd_predict(args) -> int:
     try:
         day = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except ValueError:
-        print(f"tideglass predict: bad date {args.date!r} (want YYYY-MM-DD)",
-              file=sys.stderr)
+        print(
+            f"tideglass predict: bad date {args.date!r} (want YYYY-MM-DD)",
+            file=sys.stderr,
+        )
         return 2
     path = os.path.join(args.store, f"{args.station}.json")
     if not os.path.exists(path):
-        print(f"tideglass predict: no model for station {args.station!r} "
-              f"(looked in {args.store!r})", file=sys.stderr)
+        print(
+            f"tideglass predict: no model for station {args.station!r} "
+            f"(looked in {args.store!r})",
+            file=sys.stderr,
+        )
         return 2
     model = TideModel.load_harmonic(path)
     n = args.days * 24
@@ -161,30 +181,40 @@ def cmd_reproduce(args) -> int:
     cas = ArtifactStore(os.path.join(args.store, "cas"))
     h = cas.resolve(args.hash)
     if h is None:
-        print(f"tideglass reproduce: no artifact for hash {args.hash!r} "
-              f"in {cas.root!r}", file=sys.stderr)
+        print(
+            f"tideglass reproduce: no artifact for hash {args.hash!r} in {cas.root!r}",
+            file=sys.stderr,
+        )
         return 2
     if not cas.verify(h):
-        print(f"tideglass reproduce: {h} failed bit-for-bit verification "
-              f"(store corrupted or tampered)", file=sys.stderr)
+        print(
+            f"tideglass reproduce: {h} failed bit-for-bit verification "
+            f"(store corrupted or tampered)",
+            file=sys.stderr,
+        )
         return 2
     li = cas.lineage_of(h) or {}
     obs = li.get("obs") or {}
     print(f"hash:     {h}")
     print(f"station:  {cas.station_of(h)}")
     print("verified: bit-for-bit (stored blob rehashes to key)")
-    print(f"lineage   obs: {obs.get('data_sha256')}  "
-          f"start: {obs.get('obs_start')}  end: {obs.get('obs_end')}")
-    print(f"          peers: {len(li.get('peers', []))}  "
-          f"parent: {str(li.get('parent')) or '-'}  "
-          f"source: {li.get('source')}")
+    print(
+        f"lineage   obs: {obs.get('data_sha256')}  "
+        f"start: {obs.get('obs_start')}  end: {obs.get('obs_end')}"
+    )
+    print(
+        f"          peers: {len(li.get('peers', []))}  "
+        f"parent: {str(li.get('parent')) or '-'}  "
+        f"source: {li.get('source')}"
+    )
     if args.date:
         try:
-            day = datetime.strptime(args.date, "%Y-%m-%d").replace(
-                tzinfo=timezone.utc)
+            day = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         except ValueError:
-            print(f"tideglass reproduce: bad date {args.date!r} "
-                  f"(want YYYY-MM-DD)", file=sys.stderr)
+            print(
+                f"tideglass reproduce: bad date {args.date!r} (want YYYY-MM-DD)",
+                file=sys.stderr,
+            )
             return 2
         times = [day + timedelta(hours=i) for i in range(args.days * 24)]
         pred = cas.reproduce(h, times)
@@ -203,7 +233,8 @@ def cmd_smooth(args) -> int:
         return 2
     try:
         model = JointModel.fit(
-            times, heights,
+            times,
+            heights,
             auto_select=not args.no_select,
             alpha=args.alpha,
             station=args.station,
@@ -213,8 +244,10 @@ def cmd_smooth(args) -> int:
         return 2
     fit = model.fit_result
     print(f"# station={fit.meta.get('station', args.station)} n={fit.observed.size}")
-    print(f"# secular_trend_mm_yr={fit.trend_mm_yr:+.3f} "
-          f"±{fit.trend_mm_yr_se:.3f}  surge_phi={fit.phi:.3f}  rmse={fit.meta['rmse']:.4f}")
+    print(
+        f"# secular_trend_mm_yr={fit.trend_mm_yr:+.3f} "
+        f"±{fit.trend_mm_yr_se:.3f}  surge_phi={fit.phi:.3f}  rmse={fit.meta['rmse']:.4f}"
+    )
     print("# time observed model tide surge trend")
     for t, o, mo, ti, su, tr in zip(
         times, fit.observed, fit.model, fit.tide, fit.surge, fit.trend
@@ -245,12 +278,17 @@ def cmd_calibrate(args) -> int:
     n_test = max(24, round(len(times) * args.test_fraction))
     n_calib = max(24, round(len(times) * args.calib_fraction))
     if len(times) < n_test + n_calib + 72:
-        print(f"tideglass calibrate: need ≥ {n_test + n_calib + 72} rows "
-              f"for a train/calib/test split, got {len(times)}",
-              file=sys.stderr)
+        print(
+            f"tideglass calibrate: need ≥ {n_test + n_calib + 72} rows "
+            f"for a train/calib/test split, got {len(times)}",
+            file=sys.stderr,
+        )
         return 2
-    train_t, train_y = times[:-(n_test + n_calib)], y[:-(n_test + n_calib)]
-    calib_t, calib_y = times[-(n_test + n_calib):-n_test], y[-(n_test + n_calib):-n_test]
+    train_t, train_y = times[: -(n_test + n_calib)], y[: -(n_test + n_calib)]
+    calib_t, calib_y = (
+        times[-(n_test + n_calib) : -n_test],
+        y[-(n_test + n_calib) : -n_test],
+    )
     test_t, test_y = times[-n_test:], y[-n_test:]
     station = args.station or os.path.splitext(os.path.basename(args.csv))[0]
 
@@ -259,11 +297,14 @@ def cmd_calibrate(args) -> int:
     cal = evaluate_calibration(pred, test_y)
     sig_test = (np.asarray(pred.upper) - np.asarray(pred.lower)) / (2.0 * 1.96)
     pred_calib = model.predict(calib_t)
-    sig_calib = ((np.asarray(pred_calib.upper) - np.asarray(pred_calib.lower))
-                 / (2.0 * 1.96))
+    sig_calib = (np.asarray(pred_calib.upper) - np.asarray(pred_calib.lower)) / (
+        2.0 * 1.96
+    )
 
-    print(f"station: {station}  train: {len(train_t)}  "
-          f"calib: {len(calib_t)}  test: {len(test_t)}")
+    print(
+        f"station: {station}  train: {len(train_t)}  "
+        f"calib: {len(calib_t)}  test: {len(test_t)}"
+    )
     print(f"{'metric':<22}{'value':>12}")
     print(f"{'crps(m)':<22}{cal['crps']:>12.4f}")
     print(f"{'rmse(m)':<22}{cal['rmse']:>12.4f}")
@@ -278,27 +319,27 @@ def cmd_calibrate(args) -> int:
     for nom, emp in zip(rel["levels"], rel["empirical"]):
         print(f"  {nom:>6.2f} -> {emp:6.4f}")
 
-    lo, hi, q = conformalize(pred.mean, sig_test, pred_calib.mean,
-                             sig_calib, calib_y, alpha=args.alpha_level)
+    lo, hi, q = conformalize(
+        pred.mean, sig_test, pred_calib.mean, sig_calib, calib_y, alpha=args.alpha_level
+    )
     conf_cov = float(np.mean((lo <= test_y) & (test_y <= hi)))
-    print(f"conformal q (1-a={1.0 - args.alpha_level:.2f}): {q:.4f}  "
-          f"coverage: {conf_cov:.4f}")
+    print(
+        f"conformal q (1-a={1.0 - args.alpha_level:.2f}): {q:.4f}  "
+        f"coverage: {conf_cov:.4f}"
+    )
 
     attr = constituent_attribution(model, test_t)
     print("per-constituent variance share:")
-    for name, share in sorted(
-        zip(attr["names"], attr["share"]), key=lambda kv: -kv[1]
-    ):
+    for name, share in sorted(zip(attr["names"], attr["share"]), key=lambda kv: -kv[1]):
         print(f"  {name:<5} {share:7.4f}")
 
     if args.regimes:
         from tideglass.marea.regimes import learn_regime_calibration
 
         # Learn from the whole concurrent record so both regimes are populated.
-        full_t = list(times[:-(n_test + n_calib)]) + list(calib_t) + list(test_t)
+        full_t = list(times[: -(n_test + n_calib)]) + list(calib_t) + list(test_t)
         full_y = np.concatenate([train_y, calib_y, test_y])
-        rc = learn_regime_calibration(model, full_t, full_y,
-                                      alpha=args.alpha_level)
+        rc = learn_regime_calibration(model, full_t, full_y, alpha=args.alpha_level)
         print(f"\nregime-conditional calibration (1-a={1.0 - args.alpha_level:.2f}):")
         print(f"  spring/neap range median: {rc.spring_range_median:.3f} m")
         print(f"  storm |residual| threshold: {rc.storm_resid_q:.3f} m")
@@ -307,8 +348,7 @@ def cmd_calibrate(args) -> int:
             if label in rc.regimes:
                 cov = rc.coverage.get(label)
                 cov_s = f"{cov:.4f}" if cov is not None else "n/a"
-                print(f"  {label:<13} q={rc.regimes[label]:.4f}  "
-                      f"coverage={cov_s}")
+                print(f"  {label:<13} q={rc.regimes[label]:.4f}  coverage={cov_s}")
         os.makedirs(args.store, exist_ok=True)
         rpath = os.path.join(args.store, f"{station}.regimes.json")
         with open(rpath, "w") as fh:
@@ -363,10 +403,14 @@ def _fmt(x: float) -> str:
 def cmd_bench(args) -> int:
     import numpy as np
 
-    if args.against == "tpxo" and (not args.global_model
-                                   or args.lon is None or args.lat is None):
-        print("tideglass bench: --against tpxo requires --global-model PATH "
-              "and --lon/--lat (gauge coordinates)", file=sys.stderr)
+    if args.against == "tpxo" and (
+        not args.global_model or args.lon is None or args.lat is None
+    ):
+        print(
+            "tideglass bench: --against tpxo requires --global-model PATH "
+            "and --lon/--lat (gauge coordinates)",
+            file=sys.stderr,
+        )
         return 2
     try:
         times, heights = read_csv(args.csv)
@@ -414,8 +458,12 @@ def cmd_bench(args) -> int:
                 from tideglass.marea.tpxo import tpxo_model_at
 
                 global_model = tpxo_model_at(
-                    args.global_model, args.lon, args.lat,
-                    constituents=consts or None, station=station)
+                    args.global_model,
+                    args.lon,
+                    args.lat,
+                    constituents=consts or None,
+                    station=station,
+                )
             else:
                 from tideglass.marea.bench_global import (
                     global_model_at,
@@ -435,11 +483,15 @@ def cmd_bench(args) -> int:
 
     print(f"station: {station}  train: {len(train_t)}  test: {len(test_t)}")
     print(f"{'model':<10}{'rmse(m)':>10}{'peak_err':>10}{'coverage':>10}")
-    print(f"{'marea':<10}{marea['rmse']:>10.4f}"
-          f"{_fmt(marea['peak_error']):>10}{marea['coverage']:>10.4f}")
+    print(
+        f"{'marea':<10}{marea['rmse']:>10.4f}"
+        f"{_fmt(marea['peak_error']):>10}{marea['coverage']:>10.4f}"
+    )
     if rival_row is not None:
-        print(f"{rival_name:<10}{rival_row['rmse']:>10.4f}"
-              f"{_fmt(rival_row['peak_error']):>10}{'n/a':>10}")
+        print(
+            f"{rival_name:<10}{rival_row['rmse']:>10.4f}"
+            f"{_fmt(rival_row['peak_error']):>10}{'n/a':>10}"
+        )
         winner = "marea" if marea["rmse"] <= rival_row["rmse"] else rival_name
         print(f"winner (rmse): {winner}")
         if "ratio" in rival_row:
@@ -454,8 +506,10 @@ def _load_station(store: str, station: str):
 
     path = os.path.join(store, f"{station}.json")
     if not os.path.exists(path):
-        print(f"tideglass: no model for station {station!r} "
-              f"(looked in {store!r})", file=sys.stderr)
+        print(
+            f"tideglass: no model for station {station!r} (looked in {store!r})",
+            file=sys.stderr,
+        )
         return None
     return TideModel.load_harmonic(path)
 
@@ -466,29 +520,40 @@ def cmd_advise(args) -> int:
     try:
         day = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except ValueError:
-        print(f"tideglass advise: bad date {args.date!r} (want YYYY-MM-DD)",
-              file=sys.stderr)
+        print(
+            f"tideglass advise: bad date {args.date!r} (want YYYY-MM-DD)",
+            file=sys.stderr,
+        )
         return 2
     model = _load_station(args.store, args.station)
     if model is None:
         return 2
     if (args.cost is not None or args.loss is not None) and args.flood is None:
-        print("tideglass advise: --cost/--loss require --flood (the event "
-              "threshold the decision prices)", file=sys.stderr)
+        print(
+            "tideglass advise: --cost/--loss require --flood (the event "
+            "threshold the decision prices)",
+            file=sys.stderr,
+        )
         return 2
     times = [day + timedelta(hours=h) for h in range(args.days * 24)]
     advice = TideAdvisor(model).advise(
-        times, flood_threshold_m=args.flood,
+        times,
+        flood_threshold_m=args.flood,
         surge_sigma_m=args.surge_sigma,
         decision_threshold_m=args.flood,
-        cost=args.cost, loss=args.loss)
+        cost=args.cost,
+        loss=args.loss,
+    )
     print(advice.summary)
 
     if args.ledger and advice.decision is not None:
         from tideglass.marea.ledger import DecisionLedger
 
-        ledger = (DecisionLedger.load(args.ledger)
-                  if os.path.exists(args.ledger) else DecisionLedger())
+        ledger = (
+            DecisionLedger.load(args.ledger)
+            if os.path.exists(args.ledger)
+            else DecisionLedger()
+        )
         ledger.log_curve(advice.decision, args.cost, args.loss)
         os.makedirs(os.path.dirname(os.path.abspath(args.ledger)), exist_ok=True)
         ledger.save(args.ledger)
@@ -508,8 +573,10 @@ def cmd_fetch(args) -> int:
             print(f"tideglass fetch: {exc}", file=sys.stderr)
             return 2
         if not rows:
-            print(f"tideglass fetch: no data for station {args.station!r}",
-                  file=sys.stderr)
+            print(
+                f"tideglass fetch: no data for station {args.station!r}",
+                file=sys.stderr,
+            )
             return 2
         write_met_csv(rows, out)
         print(f"station: {args.station}  rows: {len(rows)} (wind + pressure)")
@@ -520,8 +587,9 @@ def cmd_fetch(args) -> int:
 
     out = args.out or f"{args.station}.csv"
     try:
-        rows = fetch_noaa_range(args.station, args.begin, args.end,
-                                datum=args.datum, interval=args.interval)
+        rows = fetch_noaa_range(
+            args.station, args.begin, args.end, datum=args.datum, interval=args.interval
+        )
     except (OSError, ValueError) as exc:
         print(f"tideglass fetch: {exc}", file=sys.stderr)
         return 2
@@ -540,7 +608,10 @@ def cmd_nowcast(args) -> int:
     os.makedirs(args.store, exist_ok=True)
     try:
         rep = OPS.rerun(
-            args.station, args.feed, store=args.store, alpha=args.alpha,
+            args.station,
+            args.feed,
+            store=args.store,
+            alpha=args.alpha,
             auto_refit=args.auto_refit,
         )
     except (OSError, ValueError) as exc:
@@ -549,9 +620,11 @@ def cmd_nowcast(args) -> int:
     print(f"station: {rep.station}  new: {rep.n_new}  skipped: {rep.n_skipped}")
     if rep.log is not None:
         print(f"assimilated: {rep.feed_start} .. {rep.feed_end}")
-        print(f"innovation: mean={rep.log.mean_innovation:+.4f} m  "
-              f"rms={rep.log.rms_innovation:.4f} m  "
-              f"surge={rep.log.last_surge:+.4f} m")
+        print(
+            f"innovation: mean={rep.log.mean_innovation:+.4f} m  "
+            f"rms={rep.log.rms_innovation:.4f} m  "
+            f"surge={rep.log.last_surge:+.4f} m"
+        )
     print(str(rep.health))
     if rep.refit_done:
         print("auto-refit: performed (artifact replaced, lineage in refit_history)")
@@ -561,9 +634,11 @@ def cmd_nowcast(args) -> int:
         from tideglass.marea.nowcast import load_state as _load_state
 
         model = TideModel.load_harmonic(
-            os.path.join(args.store, f"{args.station}.json"))
+            os.path.join(args.store, f"{args.station}.json")
+        )
         eng = _load_state(
-            model, os.path.join(args.store, f"{args.station}.nowcast.json"))
+            model, os.path.join(args.store, f"{args.station}.nowcast.json")
+        )
         last = eng.last_time
         if last is not None:
             times = [last + timedelta(hours=h + 1) for h in range(args.hours)]
@@ -585,9 +660,12 @@ def cmd_poll(args) -> int:
     while True:
         try:
             rep = OPS.poll(
-                args.station, store=args.store,
-                lookback_hours=args.lookback_h, alpha=args.alpha,
-                datum=args.datum, auto_refit=args.auto_refit,
+                args.station,
+                store=args.store,
+                lookback_hours=args.lookback_h,
+                alpha=args.alpha,
+                datum=args.datum,
+                auto_refit=args.auto_refit,
             )
         except (OSError, ValueError) as exc:
             print(f"tideglass poll: {exc}", file=sys.stderr)
@@ -599,11 +677,16 @@ def cmd_poll(args) -> int:
         if rep is None:
             print(f"[pass {passes}] station={args.station}: no new rows")
         else:
-            flag = "REFIT" if rep.health.needs_refit and not rep.refit_done else (
-                "refit-applied" if rep.refit_done else "ok")
-            print(f"[pass {passes}] station={args.station} new={rep.n_new} "
-                  f"coverage={rep.health.coverage:.3f} "
-                  f"rmse={rep.health.rmse:.4f} status={flag}")
+            flag = (
+                "REFIT"
+                if rep.health.needs_refit and not rep.refit_done
+                else ("refit-applied" if rep.refit_done else "ok")
+            )
+            print(
+                f"[pass {passes}] station={args.station} new={rep.n_new} "
+                f"coverage={rep.health.coverage:.3f} "
+                f"rmse={rep.health.rmse:.4f} status={flag}"
+            )
         if args.repeat and passes >= args.repeat:
             break
         try:
@@ -612,6 +695,97 @@ def cmd_poll(args) -> int:
             print("tideglass poll: interrupted", file=sys.stderr)
             return 130
     return 0
+
+
+def cmd_slo(args) -> int:
+    from tideglass.marea.ops import AutonomousLoop
+
+    store = args.store
+    stations = (
+        [s.strip() for s in args.stations.split(",") if s.strip()]
+        if args.stations
+        else None
+    )
+    loop = AutonomousLoop(store, stations=stations)
+    try:
+        status = loop.slo_status()
+    except (OSError, ValueError) as exc:
+        print(f"tideglass slo: {exc}", file=sys.stderr)
+        return 2
+    if not status:
+        print(f"tideglass slo: no deployed stations in {store!r}", file=sys.stderr)
+        return 2
+    if args.json:
+        out = {}
+        for s, r in sorted(status.items()):
+            out[s] = r.to_dict()
+        print(json.dumps(out, indent=2))
+        return 0
+    print(f"# fleet SLO compliance ({len(status)} station(s))")
+    print(f"{'station':<16}{'coverage':>10}{'rmse':>10}{'status':>12}")
+    met = degrading = breached = 0
+    for s, r in sorted(status.items()):
+        cov_s = f"{r.coverage:.3f}" if r.n else "n/a"
+        rmse_s = f"{r.rmse:.4f}" if r.n else "n/a"
+        print(f"{s:<16}{cov_s:>10}{rmse_s:>10}{r.status:>12}")
+        if r.status == "met":
+            met += 1
+        elif r.status == "degrading":
+            degrading += 1
+        elif r.status == "breached":
+            breached += 1
+    print(f"\nmet={met}  degrading={degrading}  breached={breached}")
+    return 0 if breached == 0 else 2
+
+
+def cmd_loop(args) -> int:
+    store = args.store
+    stations = (
+        [s.strip() for s in args.stations.split(",") if s.strip()]
+        if args.stations
+        else None
+    )
+    coords = args.coords if args.coords else None
+    federation_root = args.federation_root if args.federation_root else None
+    ledger_root = args.ledger if args.ledger else None
+    # write per-station SLO configs from the CLI defaults so the loop enforces them
+    loop = AutonomousLoop(
+        store,
+        stations=stations,
+        crowd_store=None,
+        federation_root=federation_root,
+        coords=coords,
+        ledger_root=ledger_root,
+        peer_id=args.peer_id,
+        sleep_s=args.sleep_s,
+        max_passes=args.max_passes,
+        datum=args.datum,
+        alpha=args.alpha,
+        auto_refit=args.auto_refit,
+        seed_short_min=args.seed_short_min,
+        lookback_hours=72,
+        action_cost=0.0,
+        breach_loss=0.0,
+    )
+    for st in loop._stations:
+        existing = load_slo(store, st)
+        if existing.station == "__default__" or not existing.station:
+            save_slo(
+                store,
+                SloConfig(
+                    station=st,
+                    coverage_target=args.coverage_target,
+                    coverage_tolerance=args.coverage_tol,
+                    rmse_target=args.rmse_target,
+                    rmse_tolerance=args.rmse_tol,
+                ),
+            )
+    try:
+        rc = loop.run()
+    except KeyboardInterrupt:
+        return 130
+    print(loop.slo_status_str())
+    return rc
 
 
 def _build_day_times(date: str, days: int):
@@ -645,8 +819,10 @@ def cmd_export(args) -> int:
 
 
 def cmd_serve(args) -> int:
-    print(f"tideglass serve: http://{args.host}:{args.port} "
-          f"(store={args.store}; Ctrl-C to stop)")
+    print(
+        f"tideglass serve: http://{args.host}:{args.port} "
+        f"(store={args.store}; Ctrl-C to stop)"
+    )
     run_server(args.store, args.host, args.port)
     return 0
 
@@ -655,7 +831,9 @@ def cmd_tui(args) -> int:
     try:
         times = _build_day_times(args.date, args.days)
     except ValueError:
-        print(f"tideglass tui: bad date {args.date!r} (want YYYY-MM-DD)", file=sys.stderr)
+        print(
+            f"tideglass tui: bad date {args.date!r} (want YYYY-MM-DD)", file=sys.stderr
+        )
         return 2
     model = _load_station(args.store, args.station)
     if model is None:
@@ -669,8 +847,7 @@ def cmd_contribute(args) -> int:
 
     gs = GaugeStore(args.store)
     try:
-        n = gs.add_csv(args.csv, args.station, args.lon, args.lat,
-                       source=args.source)
+        n = gs.add_csv(args.csv, args.station, args.lon, args.lat, source=args.source)
     except (OSError, ValueError) as exc:
         print(f"tideglass contribute: {exc}", file=sys.stderr)
         return 2
@@ -684,18 +861,25 @@ def cmd_network(args) -> int:
 
     gs = GaugeStore(args.store)
     if gs.count < 2:
-        print(f"tideglass network: only {gs.count} gauge(s) in {args.store!r}; "
-              f"add at least 2 with `tideglass contribute` to form a network")
+        print(
+            f"tideglass network: only {gs.count} gauge(s) in {args.store!r}; "
+            f"add at least 2 with `tideglass contribute` to form a network"
+        )
         return 2
     eff = gs.network_effect(variance_threshold=args.threshold)
-    print(f"network: {eff['n_total']} gauges, variance threshold "
-          f"{eff['variance_threshold']:.2f}")
+    print(
+        f"network: {eff['n_total']} gauges, variance threshold "
+        f"{eff['variance_threshold']:.2f}"
+    )
     print(f"{'n':>3}{'total_explained':>16}{'modes_to_thr':>14}")
     for s in eff["steps"]:
-        print(f"{s['n_stations']:>3}{s['total_explained']:>16.4f}"
-              f"{s['modes_to_threshold']:>14}")
-    print(f"network-effect gain in explained variance: "
-          f"{eff['gain_total_explained']:+.4f}")
+        print(
+            f"{s['n_stations']:>3}{s['total_explained']:>16.4f}"
+            f"{s['modes_to_threshold']:>14}"
+        )
+    print(
+        f"network-effect gain in explained variance: {eff['gain_total_explained']:+.4f}"
+    )
     return 0
 
 
@@ -728,30 +912,44 @@ def cmd_federate(args) -> int:
     global_store = None
     if args.global_store:
         global_store = os.path.join(args.global_store, "federation")
-    fed = FederatedRefit(args.store, variance_threshold=0.95,
-                         global_root=global_store)
+    fed = FederatedRefit(args.store, variance_threshold=0.95, global_root=global_store)
     try:
         rep = fed.refit(
-            args.station, args.lon, args.lat, times, heights,
-            source=args.source, alpha=args.alpha,
+            args.station,
+            args.lon,
+            args.lat,
+            times,
+            heights,
+            source=args.source,
+            alpha=args.alpha,
         )
     except (ValueError, OSError) as exc:
         print(f"tideglass federate: {exc}", file=sys.stderr)
         return 2
     print(str(rep))
     if rep.network_before and rep.network_after:
-        gain = (rep.network_after["gain_total_explained"]
-                - rep.network_before["gain_total_explained"])
-        print(f"network-effect gain: {gain:+.4f} explained variance "
-              f"({rep.network_before['n_total']} -> {rep.network_after['n_total']} gauges)")
+        gain = (
+            rep.network_after["gain_total_explained"]
+            - rep.network_before["gain_total_explained"]
+        )
+        print(
+            f"network-effect gain: {gain:+.4f} explained variance "
+            f"({rep.network_before['n_total']} -> {rep.network_after['n_total']} gauges)"
+        )
     if rep.trust is not None:
-        print(f"trust: {rep.trust:.3f} (QC reputation; low trust down-weights "
-              "the sensor in the pool)")
+        print(
+            f"trust: {rep.trust:.3f} (QC reputation; low trust down-weights "
+            "the sensor in the pool)"
+        )
     if rep.global_network_size is not None:
-        print(f"borrowed strength from {rep.global_network_size} stations "
-              "across the installed base")
+        print(
+            f"borrowed strength from {rep.global_network_size} stations "
+            "across the installed base"
+        )
     if rep.improved:
-        print(f"improved model saved: {os.path.join(fed.store.root, args.station + '.json')}")
+        print(
+            f"improved model saved: {os.path.join(fed.store.root, args.station + '.json')}"
+        )
     return 0 if rep.qc.passed else 2
 
 
@@ -765,15 +963,22 @@ def cmd_sync(args) -> int:
         return 2
     if args.epsilon is not None:
         try:
-            bundle = dp_noisify(bundle, args.epsilon, delta=args.delta,
-                                clip_m=args.clip, seed=args.dp_seed)
+            bundle = dp_noisify(
+                bundle,
+                args.epsilon,
+                delta=args.delta,
+                clip_m=args.clip,
+                seed=args.dp_seed,
+            )
         except ValueError as exc:
             print(f"tideglass sync: {exc}", file=sys.stderr)
             return 2
         dp = bundle.meta["dp"]
-        print(f"dp: Gaussian noise sigma {dp['sigma_m']:.4f} m on shared "
-              f"constants (epsilon {dp['epsilon']}, delta {dp['delta']}, "
-              f"clip {dp['clip_m']} m)")
+        print(
+            f"dp: Gaussian noise sigma {dp['sigma_m']:.4f} m on shared "
+            f"constants (epsilon {dp['epsilon']}, delta {dp['delta']}, "
+            f"clip {dp['clip_m']} m)"
+        )
     out = args.out or os.path.join(args.store, "peer_bundle.json")
     try:
         bundle.save(out)
@@ -781,12 +986,18 @@ def cmd_sync(args) -> int:
         print(f"tideglass sync: {exc}", file=sys.stderr)
         return 2
     mf = bundle.manifest()
-    print(f"peer_id: {bundle.peer_id}  stations: {len(bundle.stations)}  "
-          f"tideglass: {bundle.tideglass_version}")
-    print("anonymized: station identities stay local; bundle carries "
-          f"{len(bundle.stations)} one-way alias(es) only")
-    print(f"manifest: {mf['bundle_sha256'][:16]} "
-          f"({len(mf['stations'])} station digest(es))")
+    print(
+        f"peer_id: {bundle.peer_id}  stations: {len(bundle.stations)}  "
+        f"tideglass: {bundle.tideglass_version}"
+    )
+    print(
+        "anonymized: station identities stay local; bundle carries "
+        f"{len(bundle.stations)} one-way alias(es) only"
+    )
+    print(
+        f"manifest: {mf['bundle_sha256'][:16]} "
+        f"({len(mf['stations'])} station digest(es))"
+    )
     print(f"saved: {out}")
     return 0
 
@@ -816,18 +1027,21 @@ def cmd_merge(args) -> int:
             continue
         n += 1
         if d.is_empty:
-            print(f"  peer {d.peer_id}: unchanged (manifest matches; "
-                  "nothing pulled)")
+            print(f"  peer {d.peer_id}: unchanged (manifest matches; nothing pulled)")
         else:
             print(f"  {d}")
     rep = fed.report()
     print(f"merged: {n} peer bundle(s)")
-    print(f"federation: {rep['n_peers']} peers, {rep['n_stations']} stations "
-          "across the installed base")
+    print(
+        f"federation: {rep['n_peers']} peers, {rep['n_stations']} stations "
+        "across the installed base"
+    )
     resid = rep.get("residual")
     if resid:
-        print(f"residual stats: mean rmse {resid['mean_rmse']:.4f} m "
-              f"over {resid['n']} station(s)")
+        print(
+            f"residual stats: mean rmse {resid['mean_rmse']:.4f} m "
+            f"over {resid['n']} station(s)"
+        )
     print(f"saved: {fed.peers_dir}")
     return 0
 
@@ -837,19 +1051,24 @@ def cmd_peers(args) -> int:
 
     root = os.path.join(args.store, "federation")
     if not os.path.isdir(os.path.join(root, "peers")):
-        print(f"tideglass peers: no federation store under {root!r} "
-              "(merge a peer bundle first)", file=sys.stderr)
+        print(
+            f"tideglass peers: no federation store under {root!r} "
+            "(merge a peer bundle first)",
+            file=sys.stderr,
+        )
         return 2
     fed = GlobalFederation(root)
     print(f"federation: {fed.n_peers} peer(s), {fed.n_stations} station(s)")
     for pid, b in fed.bundles().items():
-        n_lin = sum(1 for c in b.stations.values()
-                    if c.lineage and c.lineage.get("data_sha256"))
+        n_lin = sum(
+            1 for c in b.stations.values() if c.lineage and c.lineage.get("data_sha256")
+        )
         mf = b.manifest()
-        print(f"peer {pid}: {len(b.stations)} station(s), "
-              f"generated {b.generated_at}")
-        print(f"  manifest: {mf['bundle_sha256'][:16]}  lineage: {n_lin}/"
-              f"{len(b.stations)} station(s) carry data_sha256")
+        print(f"peer {pid}: {len(b.stations)} station(s), generated {b.generated_at}")
+        print(
+            f"  manifest: {mf['bundle_sha256'][:16]}  lineage: {n_lin}/"
+            f"{len(b.stations)} station(s) carry data_sha256"
+        )
     if args.obs:
         local_obs = {}
         try:
@@ -867,8 +1086,7 @@ def cmd_peers(args) -> int:
             return 2
         print("peer trust (leave-one-peer-out vs held-out local observations):")
         for pid, s in scores.items():
-            print(f"  {s} -> "
-                  f"{'trusted' if s.trust >= 0.5 else 'down-weighted'}")
+            print(f"  {s} -> {'trusted' if s.trust >= 0.5 else 'down-weighted'}")
     return 0
 
 
@@ -886,8 +1104,13 @@ def cmd_correct(args) -> int:
         return 2
     try:
         rm, diag = learn_residual(
-            model, times, heights, bins=args.bins,
-            holdout=args.holdout, alpha=args.alpha)
+            model,
+            times,
+            heights,
+            bins=args.bins,
+            holdout=args.holdout,
+            alpha=args.alpha,
+        )
     except ValueError as exc:
         print(f"tideglass correct: {exc}", file=sys.stderr)
         return 2
@@ -895,15 +1118,21 @@ def cmd_correct(args) -> int:
     path = os.path.join(args.store, f"{args.station}.json")
     with open(path, "w") as fh:
         json.dump(model.to_artifact(), fh, indent=2)
-    print(f"station: {args.station}  n: {diag['n']}  bins: {diag['bins']} "
-          f"(day-of-year climatology)")
+    print(
+        f"station: {args.station}  n: {diag['n']}  bins: {diag['bins']} "
+        f"(day-of-year climatology)"
+    )
     print(f"max |bias|: {diag['max_abs_bias']:.4f} m")
-    print(f"rmse: {diag['rmse_before']:.4f} -> {diag['rmse_after']:.4f} m "
-          f"(held-out tail, n={diag['n_test']})")
+    print(
+        f"rmse: {diag['rmse_before']:.4f} -> {diag['rmse_after']:.4f} m "
+        f"(held-out tail, n={diag['n_test']})"
+    )
     if diag.get("coverage_after") is not None:
-        print(f"coverage: {diag['coverage_before']:.4f} -> "
-              f"{diag['coverage_after']:.4f} "
-              f"(conformal q={diag['conformal_q']:.3f})")
+        print(
+            f"coverage: {diag['coverage_before']:.4f} -> "
+            f"{diag['coverage_after']:.4f} "
+            f"(conformal q={diag['conformal_q']:.3f})"
+        )
     print(f"saved: {path} (bias table applied by every predict)")
     return 0
 
@@ -939,8 +1168,9 @@ def cmd_surge(args) -> int:
     else:
         # self-contained: fit (and save) a harmonic model from the same record
         try:
-            model = TideModel.fit(times, heights, station=station,
-                                  source=f"csv:{args.csv}")
+            model = TideModel.fit(
+                times, heights, station=station, source=f"csv:{args.csv}"
+            )
         except ValueError as exc:
             print(f"tideglass surge: {exc}", file=sys.stderr)
             return 2
@@ -952,8 +1182,8 @@ def cmd_surge(args) -> int:
     resid = heights - np.asarray(pred.mean, dtype=float)
     try:
         resp, diag = learn_met_response(
-            times, resid, mt, ws, wd, pr,
-            max_lag_hours=args.max_lag, p_ref=args.p_ref)
+            times, resid, mt, ws, wd, pr, max_lag_hours=args.max_lag, p_ref=args.p_ref
+        )
     except ValueError as exc:
         print(f"tideglass surge: {exc}", file=sys.stderr)
         return 2
@@ -971,13 +1201,15 @@ def cmd_surge(args) -> int:
             dt, dq = read_discharge_csv(args.discharge)
             met_residual = resid - resp.surge(times, ws, wd, pr)
             discharge, dcdiag = learn_discharge_coupling(
-                times, met_residual, dt, dq, tau_hours=args.discharge_tau)
-            print(f"discharge coupling: alpha={discharge.alpha:.5f}  "
-                  f"beta={discharge.beta:.3f}  "
-                  f"r2={dcdiag['r2']:.3f}  n={dcdiag['n']}")
+                times, met_residual, dt, dq, tau_hours=args.discharge_tau
+            )
+            print(
+                f"discharge coupling: alpha={discharge.alpha:.5f}  "
+                f"beta={discharge.beta:.3f}  "
+                f"r2={dcdiag['r2']:.3f}  n={dcdiag['n']}"
+            )
         except (OSError, ValueError) as exc:
-            print(f"tideglass surge: discharge coupling failed: {exc}",
-                  file=sys.stderr)
+            print(f"tideglass surge: discharge coupling failed: {exc}", file=sys.stderr)
 
     # v2.3: package a richer SurgeResponse (met + AR + discharge) for federation
     ar = None
@@ -999,11 +1231,15 @@ def cmd_surge(args) -> int:
     print(f"  intercept: {resp.intercept:+.4f} m")
     print(f"  stress u:  {resp.stress_u:+.5f} m/(m2/s2)")
     print(f"  stress v:  {resp.stress_v:+.5f} m/(m2/s2)")
-    print(f"  barometer: {resp.barometer:+.5f} m/hPa  "
-          f"(theory {diag['barometer_theory']:+.5f}, "
-          f"ratio {diag['barometer_ratio']:.2f})")
-    print(f"  fit: r2 {diag['r2']:.3f}  sigma {diag['sigma']:.4f} m  "
-          f"(rmse {diag['rmse_before']:.4f} -> {diag['rmse_after']:.4f} m)")
+    print(
+        f"  barometer: {resp.barometer:+.5f} m/hPa  "
+        f"(theory {diag['barometer_theory']:+.5f}, "
+        f"ratio {diag['barometer_ratio']:.2f})"
+    )
+    print(
+        f"  fit: r2 {diag['r2']:.3f}  sigma {diag['sigma']:.4f} m  "
+        f"(rmse {diag['rmse_before']:.4f} -> {diag['rmse_after']:.4f} m)"
+    )
     print(f"saved: {met_path}")
 
     if args.forecast:
@@ -1014,8 +1250,11 @@ def cmd_surge(args) -> int:
             return 2
         if ft:
             f0 = ft[0]
-            keep = [i for i, t in enumerate(ft)
-                    if (t - f0).total_seconds() / 3600.0 < args.hours]
+            keep = [
+                i
+                for i, t in enumerate(ft)
+                if (t - f0).total_seconds() / 3600.0 < args.hours
+            ]
             ft = [ft[i] for i in keep]
             fws = np.asarray(fws)[keep]
             fwd = np.asarray(fwd)[keep]
@@ -1027,36 +1266,48 @@ def cmd_surge(args) -> int:
         gws = np.concatenate([np.asarray(ws[-pre:]), np.asarray(fws)])
         gwd = np.concatenate([np.asarray(wd[-pre:]), np.asarray(fwd)])
         gpr = np.concatenate([np.asarray(pr[-pre:]), np.asarray(fpr)])
-        fc_all = surge_resp.forecast(gt, gws, gwd, gpr, ar=ar,
-                               last_residual=float(resid[-1]), origin=times[-1])
+        fc_all = surge_resp.forecast(
+            gt, gws, gwd, gpr, ar=ar, last_residual=float(resid[-1]), origin=times[-1]
+        )
         fc_mean = np.asarray(fc_all.mean, dtype=float)[pre:]
         fc_sigma = np.asarray(fc_all.sigma, dtype=float)[pre:]
         tide_pred = model.predict(ft)
         p = None
         if args.flood is not None and len(ft):
-            p = flood_probability(tide_pred, args.flood,
-                                  surge_mean=fc_mean, surge_sigma=fc_sigma)
+            p = flood_probability(
+                tide_pred, args.flood, surge_mean=fc_mean, surge_sigma=fc_sigma
+            )
         print(f"\nsurge forecast ({args.hours} h from {ft[0].isoformat()}):")
         for i, t in enumerate(ft):
-            line = (f"  {t.isoformat()}  {fc_mean[i]:+.3f} m "
-                    f"+/- {1.96 * fc_sigma[i]:.3f}")
+            line = (
+                f"  {t.isoformat()}  {fc_mean[i]:+.3f} m +/- {1.96 * fc_sigma[i]:.3f}"
+            )
             if p is not None:
                 line += f"   P(flood>{args.flood:.2f})={p[i]:.4f}"
             print(line)
-        if (args.cost is not None or args.loss is not None) \
-                and args.flood is None:
-            print("tideglass surge: --cost/--loss require --flood "
-                  "(the event threshold)", file=sys.stderr)
+        if (args.cost is not None or args.loss is not None) and args.flood is None:
+            print(
+                "tideglass surge: --cost/--loss require --flood (the event threshold)",
+                file=sys.stderr,
+            )
             return 2
         if (args.cost is not None) != (args.loss is not None):
-            print("tideglass surge: --cost and --loss must be given together",
-                  file=sys.stderr)
+            print(
+                "tideglass surge: --cost and --loss must be given together",
+                file=sys.stderr,
+            )
             return 2
         if args.cost is not None:
             try:
                 curve = decision_curve(
-                    ft, tide_pred, args.flood, args.cost, args.loss,
-                    surge_mean=fc_mean, surge_sigma=fc_sigma)
+                    ft,
+                    tide_pred,
+                    args.flood,
+                    args.cost,
+                    args.loss,
+                    surge_mean=fc_mean,
+                    surge_sigma=fc_sigma,
+                )
             except ValueError as exc:
                 print(f"tideglass surge: {exc}", file=sys.stderr)
                 return 2
@@ -1069,19 +1320,22 @@ def cmd_validate(args) -> int:
     from tideglass.marea import harmonics_db as HDB
 
     rep = HDB.coverage_report()
-    print(f"global coverage: {rep['n_stations']} stations across "
-          f"{rep['n_regions']} regions (published harmonics, no fit needed)")
+    print(
+        f"global coverage: {rep['n_stations']} stations across "
+        f"{rep['n_regions']} regions (published harmonics, no fit needed)"
+    )
     for region, n in rep["regions"].items():
         print(f"  {region:<20} {n} stations")
     print()
     regions = [args.region] if args.region else HDB.list_regions()
     for region in regions:
         print(f"region: {region}")
-        print(f"{'station':<16}{'range_m':>10}{'dominant':>10}"
-              f"{'n_const':>10}")
+        print(f"{'station':<16}{'range_m':>10}{'dominant':>10}{'n_const':>10}")
         for row in HDB.benchmark_region(region):
-            print(f"{row['station']:<16}{row['range_m']:>10.3f}"
-                  f"{row['dominant']:>10}{row['n_constituents']:>10}")
+            print(
+                f"{row['station']:<16}{row['range_m']:>10.3f}"
+                f"{row['dominant']:>10}{row['n_constituents']:>10}"
+            )
         print()
     return 0
 
@@ -1127,13 +1381,18 @@ def cmd_alert(args) -> int:
     if model is None:
         return 2
     events = surge_events(
-        heights, model.predict(times).mean, times,
-        station=args.station, threshold_m=args.threshold,
+        heights,
+        model.predict(times).mean,
+        times,
+        station=args.station,
+        threshold_m=args.threshold,
     )
     print(f"station: {args.station}  surge events: {len(events)}")
     for e in events:
-        print(f"  {e.start.isoformat()} -> {e.end.isoformat()}  "
-              f"peak |residual|={e.peak_residual_m:.3f} m")
+        print(
+            f"  {e.start.isoformat()} -> {e.end.isoformat()}  "
+            f"peak |residual|={e.peak_residual_m:.3f} m"
+        )
     return 0
 
 
@@ -1146,8 +1405,11 @@ def cmd_pool(args) -> int:
         print(f"tideglass pool: {exc}", file=sys.stderr)
         return 2
     if not os.path.isdir(args.store):
-        print(f"tideglass pool: no artifact store at {args.store!r} "
-              "(fit the network stations first)", file=sys.stderr)
+        print(
+            f"tideglass pool: no artifact store at {args.store!r} "
+            "(fit the network stations first)",
+            file=sys.stderr,
+        )
         return 2
     models = {}
     for fn in sorted(os.listdir(args.store)):
@@ -1159,8 +1421,11 @@ def cmd_pool(args) -> int:
         except (OSError, ValueError, KeyError):
             print(f"# skipping {fn}: not a harmonic artifact")
     if len(models) < 2:
-        print(f"tideglass pool: need ≥ 2 network models in {args.store!r}, "
-              f"found {len(models)}", file=sys.stderr)
+        print(
+            f"tideglass pool: need ≥ 2 network models in {args.store!r}, "
+            f"found {len(models)}",
+            file=sys.stderr,
+        )
         return 2
     try:
         pool = HierarchicalPool(models)
@@ -1172,18 +1437,26 @@ def cmd_pool(args) -> int:
     path = os.path.join(args.store, f"{args.station}.json")
     with open(path, "w") as fh:
         json.dump(pooled.to_artifact(), fh, indent=2)
-    print(f"station: {args.station}  network: {len(models)} stations  "
-          f"obs: {len(times)}")
-    print(f"mean_shrinkage: {pooled.meta['mean_shrinkage']:.4f} "
-          "(0 = own data, 1 = pure prior)")
+    print(
+        f"station: {args.station}  network: {len(models)} stations  obs: {len(times)}"
+    )
+    print(
+        f"mean_shrinkage: {pooled.meta['mean_shrinkage']:.4f} "
+        "(0 = own data, 1 = pure prior)"
+    )
     print(f"{'constituent':<12}{'own_amp':>10}{'pooled_amp':>12}{'shrinkage':>11}")
-    own_names = {f.name: f for f in
-                 TideModel.fit(times, heights, auto_select=False,
-                               candidates=pool.union).constituents()}
+    own_names = {
+        f.name: f
+        for f in TideModel.fit(
+            times, heights, auto_select=False, candidates=pool.union
+        ).constituents()
+    }
     for f in pooled.constituents():
         own_amp = own_names[f.name].amplitude if f.name in own_names else 0.0
-        print(f"{f.name:<12}{own_amp:>10.4f}{f.amplitude:>12.4f}"
-              f"{pooled.meta['shrinkage'][f.name]:>11.4f}")
+        print(
+            f"{f.name:<12}{own_amp:>10.4f}{f.amplitude:>12.4f}"
+            f"{pooled.meta['shrinkage'][f.name]:>11.4f}"
+        )
     print(f"saved: {path}")
     return 0
 
@@ -1200,14 +1473,10 @@ def cmd_extremes(args) -> int:
         skew_surge,
     )
 
-
-
     try:
-
         times, heights = read_csv(args.csv)
 
     except (OSError, ValueError) as exc:
-
         print(f"tideglass extremes: {exc}", file=sys.stderr)
 
         return 2
@@ -1221,46 +1490,38 @@ def cmd_extremes(args) -> int:
     station = args.station or os.path.splitext(os.path.basename(args.csv))[0]
 
     try:
-
         model = TideModel.fit(
-
-            times, y, auto_select=not args.no_select, alpha=args.alpha,
-
-            station=station)
+            times, y, auto_select=not args.no_select, alpha=args.alpha, station=station
+        )
 
         sk = skew_surge(times, y, model.predict(times).mean)
 
         thresh = float(np.quantile(sk.skew, args.threshold_q))
 
-        _, kv = decluster(sk.times, sk.skew, gap_hours=args.gap_h,
-
-                          threshold=thresh)
+        _, kv = decluster(sk.times, sk.skew, gap_hours=args.gap_h, threshold=thresh)
 
         g = fit_gpd(kv, threshold=thresh)
 
     except ValueError as exc:
-
         print(f"tideglass extremes: {exc}", file=sys.stderr)
 
         return 2
 
     rate = annual_rate(times, g.n_peaks)
 
-    print(f"station: {station}  obs: {len(times)}  "
+    print(f"station: {station}  obs: {len(times)}  high waters: {len(sk.times)}")
 
-          f"high waters: {len(sk.times)}")
+    print(
+        f"skew surge: max={float(np.max(sk.skew)):.4f} m  "
+        f"mean={float(np.mean(sk.skew)):.4f} m"
+    )
 
-    print(f"skew surge: max={float(np.max(sk.skew)):.4f} m  "
-
-          f"mean={float(np.mean(sk.skew)):.4f} m")
-
-    print(f"declustered peaks: {len(kv)}  threshold: {thresh:.4f} m  "
-
-          f"exceedances: {g.n_peaks}  rate: {rate:.2f}/yr")
+    print(
+        f"declustered peaks: {len(kv)}  threshold: {thresh:.4f} m  "
+        f"exceedances: {g.n_peaks}  rate: {rate:.2f}/yr"
+    )
 
     print(f"GPD: loc={g.loc:.4f} m  scale={g.scale:.4f} m  shape={g.shape:+.4f}")
-
-
 
     # v2.3: write the GPD fit as <station>.gpd.json for federation pooling
 
@@ -1269,45 +1530,41 @@ def cmd_extremes(args) -> int:
     gpd_path = os.path.join(args.store, f"{station}.gpd.json")
 
     with open(gpd_path, "w") as fh:
-
-        json.dump({
-
-            "gpd": {"loc": float(g.loc), "scale": float(g.scale),
-
-                    "shape": float(g.shape), "n_peaks": int(g.n_peaks)},
-
-            "rate": float(rate),
-
-        }, fh, indent=2)
+        json.dump(
+            {
+                "gpd": {
+                    "loc": float(g.loc),
+                    "scale": float(g.scale),
+                    "shape": float(g.shape),
+                    "n_peaks": int(g.n_peaks),
+                },
+                "rate": float(rate),
+            },
+            fh,
+            indent=2,
+        )
 
     print(f"saved: {gpd_path}")
 
-
-
     try:
-
         periods = [float(p) for p in args.return_periods.split(",") if p.strip()]
 
     except ValueError:
-
-        print("tideglass extremes: bad --return-periods "
-
-              "(want e.g. '1,10,100')", file=sys.stderr)
+        print(
+            "tideglass extremes: bad --return-periods (want e.g. '1,10,100')",
+            file=sys.stderr,
+        )
 
         return 2
 
     print("return level (m):")
 
     for t in periods:
-
         print(f"  {t:>8g}-yr  {g.return_level(t, rate):.4f}")
-
-
 
     # v2.3: pooled return levels from the installed base (if requested)
 
     if args.pool and args.pool_store:
-
         from tideglass.marea.federation import GlobalFederation, _gpd_return_level
 
         fed = GlobalFederation(args.pool_store)
@@ -1315,61 +1572,50 @@ def cmd_extremes(args) -> int:
         esum = fed.extremes_summary()
 
         if esum is None:
-
             print("pool: no peer bundles carry extremes data")
 
         else:
-
             pooled = esum["gpd"]
 
-            print(f"\npooled extremes ({esum['n_peers']} peers, "
+            print(
+                f"\npooled extremes ({esum['n_peers']} peers, "
+                f"{esum['n_stations']} stations, "
+                f"{esum['n_peaks_total']} peaks total):"
+            )
 
-                  f"{esum['n_stations']} stations, "
-
-                  f"{esum['n_peaks_total']} peaks total):")
-
-            print(f"  GPD: loc={pooled['loc']:.4f} m  "
-
-                  f"scale={pooled['scale']:.4f} m  "
-
-                  f"shape={pooled['shape']:+.4f}")
+            print(
+                f"  GPD: loc={pooled['loc']:.4f} m  "
+                f"scale={pooled['scale']:.4f} m  "
+                f"shape={pooled['shape']:+.4f}"
+            )
 
             if esum.get("rate_per_year") is not None:
-
                 prate = esum["rate_per_year"]
 
                 print(f"  rate: {prate:.2f}/yr")
 
                 for t in periods:
-
                     rl = _gpd_return_level(pooled, t, prate)
 
                     print(f"  {t:>8g}-yr  {rl:.4f} m")
-
-
 
     resid = y - model.predict(times).mean
 
     total = model.predict(times).mean + resid
 
-    levels = sorted({float(np.quantile(total, 0.99)),
-
-                     float(np.quantile(total, 0.999))}
-
-                    | ({float(args.flood)} if args.flood is not None else set()))
+    levels = sorted(
+        {float(np.quantile(total, 0.99)), float(np.quantile(total, 0.999))}
+        | ({float(args.flood)} if args.flood is not None else set())
+    )
 
     print("joint exceedance P(tide+surge > level):")
 
     for z in levels:
-
-        p = joint_exceedance_probability(
-
-            model.predict(times).mean, resid, z)
+        p = joint_exceedance_probability(model.predict(times).mean, resid, z)
 
         print(f"  {z:7.4f} m  p_hour={p:.6f}  ~{p * 8760.0:.1f} h/yr")
 
     return 0
-
 
 
 def cmd_world(args) -> int:
@@ -1381,8 +1627,10 @@ def cmd_world(args) -> int:
     try:
         day = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except ValueError:
-        print(f"tideglass world: bad date {args.date!r} (want YYYY-MM-DD)",
-              file=sys.stderr)
+        print(
+            f"tideglass world: bad date {args.date!r} (want YYYY-MM-DD)",
+            file=sys.stderr,
+        )
         return 2
     times = [day + timedelta(hours=h) for h in range(max(1, int(args.days)) * 24)]
 
@@ -1395,13 +1643,17 @@ def cmd_world(args) -> int:
             return 2
     try:
         wm = WorldModel.from_artifacts(
-            args.store, coords=args.coords, altimetry=altimetry)
+            args.store, coords=args.coords, altimetry=altimetry
+        )
     except (OSError, ValueError) as exc:
         print(f"tideglass world: {exc}", file=sys.stderr)
         return 2
     if not wm.models:
-        print(f"tideglass world: no models found in {args.store!r} "
-              "(need <station>.json artifacts and a coords file)", file=sys.stderr)
+        print(
+            f"tideglass world: no models found in {args.store!r} "
+            "(need <station>.json artifacts and a coords file)",
+            file=sys.stderr,
+        )
         return 2
 
     met = None
@@ -1429,39 +1681,63 @@ def cmd_world(args) -> int:
     n = len(times)
     print(f"# lon={args.lon} lat={args.lat} date={args.date} n={n}")
     comp = pred.components
-    print(f"# network: {comp['n_stations']} stations; "
-          f"constituents: {','.join(comp['constituents'])}")
+    print(
+        f"# network: {comp['n_stations']} stations; "
+        f"constituents: {','.join(comp['constituents'])}"
+    )
     if altimetry is not None:
-        print(f"# altimetry virtual peer: correction "
-              f"{float(pred.altimetry_correction[0]):+.4f} m")
+        print(
+            f"# altimetry virtual peer: correction "
+            f"{float(pred.altimetry_correction[0]):+.4f} m"
+        )
     if pred.surge_mean is not None:
         tot = int(np.sum(np.abs(pred.surge_mean) > 0.0))
-        print(f"# surge: {tot} hours with non-zero forecast; "
-              f"mean |surge| {float(np.mean(np.abs(pred.surge_mean))):.4f} m")
+        print(
+            f"# surge: {tot} hours with non-zero forecast; "
+            f"mean |surge| {float(np.mean(np.abs(pred.surge_mean))):.4f} m"
+        )
     print("# time total_m lower_m upper_m tide_m surge_m")
     for t, m, lo, hi, tm, sm in zip(
-        times, pred.mean, pred.lower, pred.upper,
+        times,
+        pred.mean,
+        pred.lower,
+        pred.upper,
         pred.tide_mean,
-        (pred.surge_mean if pred.surge_mean is not None else np.zeros(n))
+        (pred.surge_mean if pred.surge_mean is not None else np.zeros(n)),
     ):
         print(f"{t.isoformat()} {m:.4f} {lo:.4f} {hi:.4f} {tm:.4f} {sm:.4f}")
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="tideglass", description="Tide intelligence engine")
+    ap = argparse.ArgumentParser(
+        prog="tideglass", description="Tide intelligence engine"
+    )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p_fit = sub.add_parser("fit", help="fit a model from observations")
     p_fit.add_argument("csv", help="CSV file with time,height rows")
-    p_fit.add_argument("--station", default=None, help="station name (default: CSV stem)")
+    p_fit.add_argument(
+        "--station", default=None, help="station name (default: CSV stem)"
+    )
     p_fit.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
-    p_fit.add_argument("--alpha", type=float, default=0.05, help="selection significance")
-    p_fit.add_argument("--no-select", action="store_true", help="fit principal 8 directly")
-    p_fit.add_argument("--source", default=None,
-                       help="provenance tag pinned in the artifact (default: csv:<path>)")
-    p_fit.add_argument("--kernel", choices=["numpy", "numba", "auto"], default="numpy",
-                       help="numeric backend for the design matrix (default: numpy)")
+    p_fit.add_argument(
+        "--alpha", type=float, default=0.05, help="selection significance"
+    )
+    p_fit.add_argument(
+        "--no-select", action="store_true", help="fit principal 8 directly"
+    )
+    p_fit.add_argument(
+        "--source",
+        default=None,
+        help="provenance tag pinned in the artifact (default: csv:<path>)",
+    )
+    p_fit.add_argument(
+        "--kernel",
+        choices=["numpy", "numba", "auto"],
+        default="numpy",
+        help="numeric backend for the design matrix (default: numpy)",
+    )
     p_fit.set_defaults(func=cmd_fit)
 
     p_pred = sub.add_parser("predict", help="height curve with 95%% bands")
@@ -1473,50 +1749,95 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_bench = sub.add_parser("bench", help="benchmark Marea vs pytides on a gauge CSV")
     p_bench.add_argument("csv", help="CSV file with time,height rows")
-    p_bench.add_argument("--station", default=None, help="station name (default: CSV stem)")
-    p_bench.add_argument("--test-fraction", type=float, default=0.25,
-                         help="held-out fraction (chronological tail)")
-    p_bench.add_argument("--alpha", type=float, default=0.05, help="selection significance")
-    p_bench.add_argument("--against", choices=["pytides", "tpxo", "none"],
-                         default="pytides",
-                         help="baseline to beat (tpxo = global model grid)")
-    p_bench.add_argument("--global-model", default=None,
-                         help="TPXO/FES harmonic grid: CSV (lon,lat,constituent,"
-                              "amplitude,phase) or genuine NetCDF3 .nc elevation "
-                              "file, for --against tpxo")
-    p_bench.add_argument("--consts", default="M2,S2,N2,K2,K1,O1,P1,Q1",
-                         help="comma-separated constituents to extract from a "
-                              ".nc global file (default: principal 8)")
-    p_bench.add_argument("--lon", type=float, default=None,
-                         help="gauge longitude for --against tpxo")
-    p_bench.add_argument("--lat", type=float, default=None,
-                         help="gauge latitude for --against tpxo")
+    p_bench.add_argument(
+        "--station", default=None, help="station name (default: CSV stem)"
+    )
+    p_bench.add_argument(
+        "--test-fraction",
+        type=float,
+        default=0.25,
+        help="held-out fraction (chronological tail)",
+    )
+    p_bench.add_argument(
+        "--alpha", type=float, default=0.05, help="selection significance"
+    )
+    p_bench.add_argument(
+        "--against",
+        choices=["pytides", "tpxo", "none"],
+        default="pytides",
+        help="baseline to beat (tpxo = global model grid)",
+    )
+    p_bench.add_argument(
+        "--global-model",
+        default=None,
+        help="TPXO/FES harmonic grid: CSV (lon,lat,constituent,"
+        "amplitude,phase) or genuine NetCDF3 .nc elevation "
+        "file, for --against tpxo",
+    )
+    p_bench.add_argument(
+        "--consts",
+        default="M2,S2,N2,K2,K1,O1,P1,Q1",
+        help="comma-separated constituents to extract from a "
+        ".nc global file (default: principal 8)",
+    )
+    p_bench.add_argument(
+        "--lon", type=float, default=None, help="gauge longitude for --against tpxo"
+    )
+    p_bench.add_argument(
+        "--lat", type=float, default=None, help="gauge latitude for --against tpxo"
+    )
     p_bench.set_defaults(func=cmd_bench)
 
     p_smooth = sub.add_parser(
         "smooth", help="joint Kalman smooth: tide + surge + secular trend"
     )
     p_smooth.add_argument("csv", help="CSV file with time,height rows")
-    p_smooth.add_argument("--station", default=None, help="station name (default: CSV stem)")
-    p_smooth.add_argument("--alpha", type=float, default=0.05, help="selection significance")
-    p_smooth.add_argument("--no-select", action="store_true", help="fit principal 8 directly")
+    p_smooth.add_argument(
+        "--station", default=None, help="station name (default: CSV stem)"
+    )
+    p_smooth.add_argument(
+        "--alpha", type=float, default=0.05, help="selection significance"
+    )
+    p_smooth.add_argument(
+        "--no-select", action="store_true", help="fit principal 8 directly"
+    )
     p_smooth.set_defaults(func=cmd_smooth)
 
-    p_cal = sub.add_parser("calibrate", help="CRPS + PIT + reliability + "
-                                            "conformal calibration on held-out data")
+    p_cal = sub.add_parser(
+        "calibrate",
+        help="CRPS + PIT + reliability + conformal calibration on held-out data",
+    )
     p_cal.add_argument("csv", help="CSV file with time,height rows")
-    p_cal.add_argument("--station", default=None, help="station name (default: CSV stem)")
-    p_cal.add_argument("--test-fraction", type=float, default=0.25,
-                       help="held-out fraction for diagnostics (chronological tail)")
-    p_cal.add_argument("--calib-fraction", type=float, default=0.2,
-                       help="held-out fraction for conformal scores "
-                            "(chronological middle)")
-    p_cal.add_argument("--alpha", type=float, default=0.05, help="selection significance")
-    p_cal.add_argument("--alpha-level", type=float, default=0.05,
-                        help="conformal miscoverage level (bands cover 1-alpha)")
-    p_cal.add_argument("--regimes", action="store_true",
-                       help="also learn per-regime (spring/neap, storm/non-storm) "
-                            "conformal quantiles and persist <station>.regimes.json")
+    p_cal.add_argument(
+        "--station", default=None, help="station name (default: CSV stem)"
+    )
+    p_cal.add_argument(
+        "--test-fraction",
+        type=float,
+        default=0.25,
+        help="held-out fraction for diagnostics (chronological tail)",
+    )
+    p_cal.add_argument(
+        "--calib-fraction",
+        type=float,
+        default=0.2,
+        help="held-out fraction for conformal scores (chronological middle)",
+    )
+    p_cal.add_argument(
+        "--alpha", type=float, default=0.05, help="selection significance"
+    )
+    p_cal.add_argument(
+        "--alpha-level",
+        type=float,
+        default=0.05,
+        help="conformal miscoverage level (bands cover 1-alpha)",
+    )
+    p_cal.add_argument(
+        "--regimes",
+        action="store_true",
+        help="also learn per-regime (spring/neap, storm/non-storm) "
+        "conformal quantiles and persist <station>.regimes.json",
+    )
     p_cal.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
     p_cal.set_defaults(func=cmd_calibrate)
 
@@ -1525,36 +1846,64 @@ def build_parser() -> argparse.ArgumentParser:
     p_adv.add_argument("date", help="YYYY-MM-DD (UTC)")
     p_adv.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
     p_adv.add_argument("--days", type=int, default=1, help="days from midnight")
-    p_adv.add_argument("--flood", type=float, default=None,
-                       help="alarm level (m): price P(level > flood) per time "
-                            "(e.g. a GPD return level from `tideglass extremes`)")
-    p_adv.add_argument("--surge-sigma", type=float, default=0.0,
-                       help="surge std (m) folded into the flood probability")
-    p_adv.add_argument("--cost", type=float, default=None,
-                       help="cost of the protective action per hour; with "
-                            "--loss, prices the act/wait decision policy "
-                            "(requires --flood as the event threshold)")
-    p_adv.add_argument("--loss", type=float, default=None,
-                        help="loss if the event hits an unprepared hour; with "
-                             "--cost, prices the act/wait decision policy "
-                             "(requires --flood as the event threshold)")
-    p_adv.add_argument("--ledger", default=None,
-                       help="log the priced decision into a DecisionLedger JSON "
-                            "file (reconciled later with --outcome via the "
-                            "'ledger' command)")
+    p_adv.add_argument(
+        "--flood",
+        type=float,
+        default=None,
+        help="alarm level (m): price P(level > flood) per time "
+        "(e.g. a GPD return level from `tideglass extremes`)",
+    )
+    p_adv.add_argument(
+        "--surge-sigma",
+        type=float,
+        default=0.0,
+        help="surge std (m) folded into the flood probability",
+    )
+    p_adv.add_argument(
+        "--cost",
+        type=float,
+        default=None,
+        help="cost of the protective action per hour; with "
+        "--loss, prices the act/wait decision policy "
+        "(requires --flood as the event threshold)",
+    )
+    p_adv.add_argument(
+        "--loss",
+        type=float,
+        default=None,
+        help="loss if the event hits an unprepared hour; with "
+        "--cost, prices the act/wait decision policy "
+        "(requires --flood as the event threshold)",
+    )
+    p_adv.add_argument(
+        "--ledger",
+        default=None,
+        help="log the priced decision into a DecisionLedger JSON "
+        "file (reconciled later with --outcome via the "
+        "'ledger' command)",
+    )
     p_adv.set_defaults(func=cmd_advise)
 
     p_fetch = sub.add_parser("fetch", help="download NOAA CO-OPS gauge CSV")
     p_fetch.add_argument("station", help="NOAA station id (e.g. 9414290)")
     p_fetch.add_argument("begin", help="start date YYYY-MM-DD (UTC)")
     p_fetch.add_argument("end", help="end date YYYY-MM-DD (UTC)")
-    p_fetch.add_argument("--out", default=None, help="output CSV (default: <station>.csv)")
+    p_fetch.add_argument(
+        "--out", default=None, help="output CSV (default: <station>.csv)"
+    )
     p_fetch.add_argument("--datum", default="MLLW", help="NOAA vertical datum")
-    p_fetch.add_argument("--interval", default="h", choices=["h", "1", "hilo"],
-                          help="passed to NOAA (observed water levels are 6-min)")
-    p_fetch.add_argument("--met", action="store_true",
-                         help="fetch meteorological wind + pressure instead of "
-                              "water levels (writes <station>.met.csv)")
+    p_fetch.add_argument(
+        "--interval",
+        default="h",
+        choices=["h", "1", "hilo"],
+        help="passed to NOAA (observed water levels are 6-min)",
+    )
+    p_fetch.add_argument(
+        "--met",
+        action="store_true",
+        help="fetch meteorological wind + pressure instead of "
+        "water levels (writes <station>.met.csv)",
+    )
     p_fetch.set_defaults(func=cmd_fetch)
 
     p_now = sub.add_parser(
@@ -1564,14 +1913,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_now.add_argument("station", help="station name (model artifact in store)")
     p_now.add_argument("feed", help="CSV file with time,height rows (recent feed)")
     p_now.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
-    p_now.add_argument("--alpha", type=float, default=0.05,
-                       help="selection significance for auto-refit")
-    p_now.add_argument("--auto-refit", dest="auto_refit", action="store_true",
-                       default=True, help="refit automatically when stale (default)")
-    p_now.add_argument("--no-auto-refit", dest="auto_refit", action="store_false",
-                       help="only report staleness, never refit")
-    p_now.add_argument("--hours", type=int, default=24,
-                       help="nowcast horizon in hours after the feed (0 to skip)")
+    p_now.add_argument(
+        "--alpha",
+        type=float,
+        default=0.05,
+        help="selection significance for auto-refit",
+    )
+    p_now.add_argument(
+        "--auto-refit",
+        dest="auto_refit",
+        action="store_true",
+        default=True,
+        help="refit automatically when stale (default)",
+    )
+    p_now.add_argument(
+        "--no-auto-refit",
+        dest="auto_refit",
+        action="store_false",
+        help="only report staleness, never refit",
+    )
+    p_now.add_argument(
+        "--hours",
+        type=int,
+        default=24,
+        help="nowcast horizon in hours after the feed (0 to skip)",
+    )
     p_now.set_defaults(func=cmd_nowcast)
 
     p_poll = sub.add_parser(
@@ -1579,19 +1945,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_poll.add_argument("station", help="NOAA station id / station name")
     p_poll.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
-    p_poll.add_argument("--lookback-h", type=int, default=72,
-                        help="hours to fetch back on the first pass")
-    p_poll.add_argument("--repeat", type=int, default=0,
-                        help="passes to run (0 = run forever)")
-    p_poll.add_argument("--sleep-s", type=float, default=3600.0,
-                        help="seconds between passes")
+    p_poll.add_argument(
+        "--lookback-h",
+        type=int,
+        default=72,
+        help="hours to fetch back on the first pass",
+    )
+    p_poll.add_argument(
+        "--repeat", type=int, default=0, help="passes to run (0 = run forever)"
+    )
+    p_poll.add_argument(
+        "--sleep-s", type=float, default=3600.0, help="seconds between passes"
+    )
     p_poll.add_argument("--datum", default="MLLW", help="NOAA vertical datum")
-    p_poll.add_argument("--alpha", type=float, default=0.05,
-                        help="selection significance for auto-refit")
-    p_poll.add_argument("--auto-refit", dest="auto_refit", action="store_true",
-                        default=True, help="refit automatically when stale (default)")
-    p_poll.add_argument("--no-auto-refit", dest="auto_refit", action="store_false",
-                        help="only report staleness, never refit")
+    p_poll.add_argument(
+        "--alpha",
+        type=float,
+        default=0.05,
+        help="selection significance for auto-refit",
+    )
+    p_poll.add_argument(
+        "--auto-refit",
+        dest="auto_refit",
+        action="store_true",
+        default=True,
+        help="refit automatically when stale (default)",
+    )
+    p_poll.add_argument(
+        "--no-auto-refit",
+        dest="auto_refit",
+        action="store_false",
+        help="only report staleness, never refit",
+    )
     p_poll.set_defaults(func=cmd_poll)
 
     p_export = sub.add_parser("export", help="write model prediction in a feed format")
@@ -1599,9 +1984,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("date", help="YYYY-MM-DD (UTC)")
     p_export.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
     p_export.add_argument("--days", type=int, default=1, help="days from midnight")
-    p_export.add_argument("--format", choices=["json", "csv", "xtide", "netcdf"],
-                          default="csv", help="output format")
-    p_export.add_argument("--out", default=None, help="output path (default: <station>.<fmt>)")
+    p_export.add_argument(
+        "--format",
+        choices=["json", "csv", "xtide", "netcdf"],
+        default="csv",
+        help="output format",
+    )
+    p_export.add_argument(
+        "--out", default=None, help="output path (default: <station>.<fmt>)"
+    )
     p_export.set_defaults(func=cmd_export)
 
     p_serve = sub.add_parser("serve", help="HTTP API: /predict and /advise")
@@ -1619,14 +2010,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_alert = sub.add_parser("alert", help="surge-flag alerts for a watched station")
     p_alert.add_argument("csv", help="CSV file with time,height rows (observations)")
-    p_alert.add_argument("--station", default=None, help="station name (default: CSV stem)")
+    p_alert.add_argument(
+        "--station", default=None, help="station name (default: CSV stem)"
+    )
     p_alert.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
-    p_alert.add_argument("--threshold", type=float, default=0.3,
-                         help="|residual| (m) that triggers an alert")
+    p_alert.add_argument(
+        "--threshold",
+        type=float,
+        default=0.3,
+        help="|residual| (m) that triggers an alert",
+    )
     p_alert.set_defaults(func=cmd_alert)
 
     p_contrib = sub.add_parser("contribute", help="upload a crowd-sourced gauge CSV")
-    p_contrib.add_argument("csv", help="CSV with time,height rows (cheap-sensor upload)")
+    p_contrib.add_argument(
+        "csv", help="CSV with time,height rows (cheap-sensor upload)"
+    )
     p_contrib.add_argument("lon", type=float, help="station longitude (deg)")
     p_contrib.add_argument("lat", type=float, help="station latitude (deg)")
     p_contrib.add_argument("--station", required=True, help="unique station id")
@@ -1636,8 +2035,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_net = sub.add_parser("network", help="show the crowd-sourced network effect")
     p_net.add_argument("--store", default=DEFAULT_STORE, help="gauge store dir")
-    p_net.add_argument("--threshold", type=float, default=0.95,
-                       help="EOF variance threshold (0..1)")
+    p_net.add_argument(
+        "--threshold", type=float, default=0.95, help="EOF variance threshold (0..1)"
+    )
     p_net.set_defaults(func=cmd_network)
 
     p_val = sub.add_parser("validate", help="global coverage + per-region benchmark")
@@ -1654,201 +2054,442 @@ def build_parser() -> argparse.ArgumentParser:
     p_qc.set_defaults(func=cmd_qc)
 
     p_fed = sub.add_parser(
-        "federate", help="QC + local fit + federated pooled refit of a sensor")
+        "federate", help="QC + local fit + federated pooled refit of a sensor"
+    )
     p_fed.add_argument("csv", help="CSV with time,height rows (cheap-sensor upload)")
     p_fed.add_argument("lon", type=float, help="station longitude (deg)")
     p_fed.add_argument("lat", type=float, help="station latitude (deg)")
     p_fed.add_argument("--station", required=True, help="unique station id")
     p_fed.add_argument("--store", default=DEFAULT_STORE, help="gauge store dir")
     p_fed.add_argument("--source", default="crowd", help="uploader/source tag")
-    p_fed.add_argument("--alpha", type=float, default=0.05,
-                      help="selection significance for the local fit")
-    p_fed.add_argument("--global-store", default=None,
-                      help="global federation dir; borrow strength from the "
-                           "installed base when pooling this sensor (v2.0)")
+    p_fed.add_argument(
+        "--alpha",
+        type=float,
+        default=0.05,
+        help="selection significance for the local fit",
+    )
+    p_fed.add_argument(
+        "--global-store",
+        default=None,
+        help="global federation dir; borrow strength from the "
+        "installed base when pooling this sensor (v2.0)",
+    )
     p_fed.set_defaults(func=cmd_federate)
 
     p_sync = sub.add_parser(
-        "sync", help="export the local network as an anonymized peer bundle (v2.0)")
+        "sync", help="export the local network as an anonymized peer bundle (v2.0)"
+    )
     p_sync.add_argument("--store", default=DEFAULT_STORE, help="gauge store dir")
-    p_sync.add_argument("--peer-id", required=True,
-                       help="this installation's federation peer id")
-    p_sync.add_argument("--out", default=None,
-                       help="bundle JSON path (default: <store>/peer_bundle.json)")
-    p_sync.add_argument("--epsilon", type=float, default=None,
-                       help="apply calibrated DP noise to the shared constants "
-                            "(Gaussian mechanism; e.g. 1.0)")
-    p_sync.add_argument("--delta", type=float, default=1e-5,
-                       help="DP delta (default 1e-5)")
-    p_sync.add_argument("--clip", type=float, default=5.0,
-                       help="per-entry sensitivity bound in m applied before "
-                            "the noise")
-    p_sync.add_argument("--dp-seed", type=int, default=None,
-                       help="seed for reproducible noise")
+    p_sync.add_argument(
+        "--peer-id", required=True, help="this installation's federation peer id"
+    )
+    p_sync.add_argument(
+        "--out",
+        default=None,
+        help="bundle JSON path (default: <store>/peer_bundle.json)",
+    )
+    p_sync.add_argument(
+        "--epsilon",
+        type=float,
+        default=None,
+        help="apply calibrated DP noise to the shared constants "
+        "(Gaussian mechanism; e.g. 1.0)",
+    )
+    p_sync.add_argument(
+        "--delta", type=float, default=1e-5, help="DP delta (default 1e-5)"
+    )
+    p_sync.add_argument(
+        "--clip",
+        type=float,
+        default=5.0,
+        help="per-entry sensitivity bound in m applied before the noise",
+    )
+    p_sync.add_argument(
+        "--dp-seed", type=int, default=None, help="seed for reproducible noise"
+    )
     p_sync.set_defaults(func=cmd_sync)
 
     p_merge = sub.add_parser(
-        "merge", help="ingest peer bundle(s) into the global federation (v2.0)")
+        "merge", help="ingest peer bundle(s) into the global federation (v2.0)"
+    )
     p_merge.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
-    p_merge.add_argument("bundle", nargs="+",
-                        help="peer bundle JSON file(s) or director(y/ies) of them")
+    p_merge.add_argument(
+        "bundle", nargs="+", help="peer bundle JSON file(s) or director(y/ies) of them"
+    )
     p_merge.set_defaults(func=cmd_merge)
 
     p_peers = sub.add_parser(
-        "peers", help="list federated peers; score their trust against your "
-                      "own observations (v2.1)")
-    p_peers.add_argument("--store", default=DEFAULT_STORE,
-                        help="artifact directory holding federation/")
-    p_peers.add_argument("--obs", nargs="*", default=None,
-                        help="local observation CSV(s) (time,height); enables "
-                             "leave-one-peer-out trust scoring")
-    p_peers.add_argument("--holdout", type=float, default=0.25,
-                        help="chronological tail fraction held out for scoring")
+        "peers",
+        help="list federated peers; score their trust against your "
+        "own observations (v2.1)",
+    )
+    p_peers.add_argument(
+        "--store", default=DEFAULT_STORE, help="artifact directory holding federation/"
+    )
+    p_peers.add_argument(
+        "--obs",
+        nargs="*",
+        default=None,
+        help="local observation CSV(s) (time,height); enables "
+        "leave-one-peer-out trust scoring",
+    )
+    p_peers.add_argument(
+        "--holdout",
+        type=float,
+        default=0.25,
+        help="chronological tail fraction held out for scoring",
+    )
     p_peers.set_defaults(func=cmd_peers)
 
     p_repro = sub.add_parser(
         "reproduce",
         help="rebuild a past prediction bit-for-bit from a content hash "
-             "(v2.2 reproducible artifact store)")
+        "(v2.2 reproducible artifact store)",
+    )
     p_repro.add_argument(
-        "hash", help="content-address of a stored model artifact "
-                     "(full sha256 or unambiguous prefix)")
-    p_repro.add_argument("--store", default=DEFAULT_STORE,
-                        help="artifact directory (CAS store lives under "
-                             "<store>/cas)")
-    p_repro.add_argument("--date", default=None,
-                        help="YYYY-MM-DD (UTC) to rebuild an hourly prediction "
-                             "from; omit to print only the verified lineage")
-    p_repro.add_argument("--days", type=int, default=1,
-                        help="days from midnight to rebuild (with --date)")
+        "hash",
+        help="content-address of a stored model artifact "
+        "(full sha256 or unambiguous prefix)",
+    )
+    p_repro.add_argument(
+        "--store",
+        default=DEFAULT_STORE,
+        help="artifact directory (CAS store lives under <store>/cas)",
+    )
+    p_repro.add_argument(
+        "--date",
+        default=None,
+        help="YYYY-MM-DD (UTC) to rebuild an hourly prediction "
+        "from; omit to print only the verified lineage",
+    )
+    p_repro.add_argument(
+        "--days",
+        type=int,
+        default=1,
+        help="days from midnight to rebuild (with --date)",
+    )
     p_repro.set_defaults(func=cmd_reproduce)
 
     p_pool = sub.add_parser(
-        "pool", help="partially-pooled model for a short record "
-                     "(borrows strength from the network in --store)")
+        "pool",
+        help="partially-pooled model for a short record "
+        "(borrows strength from the network in --store)",
+    )
     p_pool.add_argument("csv", help="CSV file with time,height rows (short record)")
     p_pool.add_argument("--station", required=True, help="new station name")
-    p_pool.add_argument("--store", default=DEFAULT_STORE, help="network artifact directory")
+    p_pool.add_argument(
+        "--store", default=DEFAULT_STORE, help="network artifact directory"
+    )
     p_pool.set_defaults(func=cmd_pool)
 
     p_ext = sub.add_parser(
-        "extremes", help="skew-surge + GPD return levels + joint exceedance")
+        "extremes", help="skew-surge + GPD return levels + joint exceedance"
+    )
     p_ext.add_argument("csv", help="CSV file with time,height rows (long record)")
-    p_ext.add_argument("--station", default=None, help="station name (default: CSV stem)")
-    p_ext.add_argument("--alpha", type=float, default=0.05, help="selection significance")
-    p_ext.add_argument("--no-select", action="store_true", help="fit principal 8 directly")
-    p_ext.add_argument("--threshold-q", type=float, default=0.9,
-                       help="POT threshold as a quantile of the skew-surge series")
-    p_ext.add_argument("--gap-h", type=float, default=72.0,
-                       help="declustering gap in hours (one storm = one peak)")
-    p_ext.add_argument("--return-periods", default="1,2,5,10,25,50,100",
-                       help="comma-separated return periods (years)")
-    p_ext.add_argument("--flood", type=float, default=None,
-                        help="alarm level (m) for the joint-exceedance table")
+    p_ext.add_argument(
+        "--station", default=None, help="station name (default: CSV stem)"
+    )
+    p_ext.add_argument(
+        "--alpha", type=float, default=0.05, help="selection significance"
+    )
+    p_ext.add_argument(
+        "--no-select", action="store_true", help="fit principal 8 directly"
+    )
+    p_ext.add_argument(
+        "--threshold-q",
+        type=float,
+        default=0.9,
+        help="POT threshold as a quantile of the skew-surge series",
+    )
+    p_ext.add_argument(
+        "--gap-h",
+        type=float,
+        default=72.0,
+        help="declustering gap in hours (one storm = one peak)",
+    )
+    p_ext.add_argument(
+        "--return-periods",
+        default="1,2,5,10,25,50,100",
+        help="comma-separated return periods (years)",
+    )
+    p_ext.add_argument(
+        "--flood",
+        type=float,
+        default=None,
+        help="alarm level (m) for the joint-exceedance table",
+    )
     p_ext.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
-    p_ext.add_argument("--pool", action="store_true",
-                       help="print pooled return levels from the installed base")
-    p_ext.add_argument("--pool-store", default=DEFAULT_STORE,
-                       help="federation store (under --pool) holding peer bundles")
+    p_ext.add_argument(
+        "--pool",
+        action="store_true",
+        help="print pooled return levels from the installed base",
+    )
+    p_ext.add_argument(
+        "--pool-store",
+        default=DEFAULT_STORE,
+        help="federation store (under --pool) holding peer bundles",
+    )
     p_ext.set_defaults(func=cmd_extremes)
 
     p_rep = sub.add_parser(
-        "report", help="one-page global validation report (markdown)")
-    p_rep.add_argument("--data-dir", default="data",
-                       help="directory holding gauge CSV records")
-    p_rep.add_argument("--out", default=None,
-                       help="write markdown to a file (default: stdout)")
+        "report", help="one-page global validation report (markdown)"
+    )
+    p_rep.add_argument(
+        "--data-dir", default="data", help="directory holding gauge CSV records"
+    )
+    p_rep.add_argument(
+        "--out", default=None, help="write markdown to a file (default: stdout)"
+    )
     p_rep.set_defaults(func=cmd_report)
 
     p_corr = sub.add_parser(
         "correct",
-        help="learn a station's residual bias table and attach it to the model")
+        help="learn a station's residual bias table and attach it to the model",
+    )
     p_corr.add_argument("csv", help="CSV with time,height rows (recent record)")
-    p_corr.add_argument("--station", default=None,
-                        help="station name (default: CSV stem)")
+    p_corr.add_argument(
+        "--station", default=None, help="station name (default: CSV stem)"
+    )
     p_corr.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
-    p_corr.add_argument("--bins", type=int, default=12,
-                        help="day-of-year climatology bins (12 = monthly)")
-    p_corr.add_argument("--holdout", type=float, default=0.25,
-                        help="chronological tail fraction for scoring")
-    p_corr.add_argument("--alpha", type=float, default=0.05,
-                        help="conformal miscoverage level for the corrected band")
+    p_corr.add_argument(
+        "--bins",
+        type=int,
+        default=12,
+        help="day-of-year climatology bins (12 = monthly)",
+    )
+    p_corr.add_argument(
+        "--holdout",
+        type=float,
+        default=0.25,
+        help="chronological tail fraction for scoring",
+    )
+    p_corr.add_argument(
+        "--alpha",
+        type=float,
+        default=0.05,
+        help="conformal miscoverage level for the corrected band",
+    )
     p_corr.set_defaults(func=cmd_correct)
 
     p_plug = sub.add_parser(
-        "plugins", help="list constituent packs (builtin + user JSON packs)")
-    p_plug.add_argument("--speeds", action="store_true",
-                        help="also print every constituent's derived speed")
+        "plugins", help="list constituent packs (builtin + user JSON packs)"
+    )
+    p_plug.add_argument(
+        "--speeds",
+        action="store_true",
+        help="also print every constituent's derived speed",
+    )
     p_plug.set_defaults(func=cmd_plugins)
 
     p_surge = sub.add_parser(
-        "surge", help="learn the wind/pressure surge response; forecast surge "
-                      "from a met forecast (v1.2)")
+        "surge",
+        help="learn the wind/pressure surge response; forecast surge "
+        "from a met forecast (v1.2)",
+    )
     p_surge.add_argument("csv", help="CSV file with time,height observations")
-    p_surge.add_argument("met_csv", help="concurrent met CSV: time,wind_speed,"
-                                         "wind_dir,pressure")
-    p_surge.add_argument("--station", default=None,
-                         help="station name (default: CSV stem)")
+    p_surge.add_argument(
+        "met_csv", help="concurrent met CSV: time,wind_speed,wind_dir,pressure"
+    )
+    p_surge.add_argument(
+        "--station", default=None, help="station name (default: CSV stem)"
+    )
     p_surge.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
-    p_surge.add_argument("--max-lag", type=int, default=6,
-                         help="maximum forcing-to-surge lag scanned (hours)")
-    p_surge.add_argument("--p-ref", type=float, default=1013.25,
-                         help="reference pressure for the inverse-barometer "
-                              "anomaly (hPa)")
-    p_surge.add_argument("--forecast", default=None,
-                         help="met forecast CSV (same format) to run through "
-                              "the learned response")
-    p_surge.add_argument("--hours", type=int, default=48,
-                         help="forecast horizon kept from the met CSV (hours)")
-    p_surge.add_argument("--flood", type=float, default=None,
-                         help="alarm level (m): prints P(level > flood) per "
-                              "forecast hour")
-    p_surge.add_argument("--cost", type=float, default=None,
-                         help="cost of the protective action per hour; with "
-                              "--loss, prices the act/wait decision (needs "
-                              "--flood)")
-    p_surge.add_argument("--loss", type=float, default=None,
-                          help="loss if the event hits an unprepared hour; "
-                               "with --cost, prices the act/wait decision "
-                               "(needs --flood)")
-    p_surge.add_argument("--discharge", default=None,
-                         help="estuary river-discharge CSV (time,discharge) to "
-                              "learn a coupling for (v2.3)")
-    p_surge.add_argument("--discharge-tau", type=int, default=48,
-                         help="antecedent averaging window (hours) for the "
-                              "discharge coupling (v2.3)")
+    p_surge.add_argument(
+        "--max-lag",
+        type=int,
+        default=6,
+        help="maximum forcing-to-surge lag scanned (hours)",
+    )
+    p_surge.add_argument(
+        "--p-ref",
+        type=float,
+        default=1013.25,
+        help="reference pressure for the inverse-barometer anomaly (hPa)",
+    )
+    p_surge.add_argument(
+        "--forecast",
+        default=None,
+        help="met forecast CSV (same format) to run through the learned response",
+    )
+    p_surge.add_argument(
+        "--hours",
+        type=int,
+        default=48,
+        help="forecast horizon kept from the met CSV (hours)",
+    )
+    p_surge.add_argument(
+        "--flood",
+        type=float,
+        default=None,
+        help="alarm level (m): prints P(level > flood) per forecast hour",
+    )
+    p_surge.add_argument(
+        "--cost",
+        type=float,
+        default=None,
+        help="cost of the protective action per hour; with "
+        "--loss, prices the act/wait decision (needs "
+        "--flood)",
+    )
+    p_surge.add_argument(
+        "--loss",
+        type=float,
+        default=None,
+        help="loss if the event hits an unprepared hour; "
+        "with --cost, prices the act/wait decision "
+        "(needs --flood)",
+    )
+    p_surge.add_argument(
+        "--discharge",
+        default=None,
+        help="estuary river-discharge CSV (time,discharge) to "
+        "learn a coupling for (v2.3)",
+    )
+    p_surge.add_argument(
+        "--discharge-tau",
+        type=int,
+        default=48,
+        help="antecedent averaging window (hours) for the discharge coupling (v2.3)",
+    )
     p_surge.set_defaults(func=cmd_surge)
 
     p_ledger = sub.add_parser(
-        "ledger", help="audit priced decisions: report realized cost vs "
-                        "always/never baselines (v1.3)")
+        "ledger",
+        help="audit priced decisions: report realized cost vs "
+        "always/never baselines (v1.3)",
+    )
     p_ledger.add_argument("station", help="station name")
     p_ledger.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
-    p_ledger.add_argument("--outcome", default=None,
-                          help="outcomes CSV (time,height) to reconcile logged "
-                               "decisions against realized water levels")
-    p_ledger.add_argument("--json", action="store_true",
-                          help="emit the report as JSON")
+    p_ledger.add_argument(
+        "--outcome",
+        default=None,
+        help="outcomes CSV (time,height) to reconcile logged "
+        "decisions against realized water levels",
+    )
+    p_ledger.add_argument("--json", action="store_true", help="emit the report as JSON")
     p_ledger.set_defaults(func=cmd_ledger)
 
     p_world = sub.add_parser(
-        "world", help="predict the global tide+surge field at any lon/lat "
-                      "(cold-start anywhere; v3.0)")
+        "world",
+        help="predict the global tide+surge field at any lon/lat "
+        "(cold-start anywhere; v3.0)",
+    )
     p_world.add_argument("lon", type=float, help="longitude (deg)")
     p_world.add_argument("lat", type=float, help="latitude (deg)")
     p_world.add_argument("date", help="YYYY-MM-DD (UTC)")
-    p_world.add_argument("--store", default=DEFAULT_STORE,
-                         help="artifact directory of <station>.json models")
-    p_world.add_argument("--coords", default=None,
-                         help="station,lon,lat CSV mapping models to coordinates")
+    p_world.add_argument(
+        "--store",
+        default=DEFAULT_STORE,
+        help="artifact directory of <station>.json models",
+    )
+    p_world.add_argument(
+        "--coords",
+        default=None,
+        help="station,lon,lat CSV mapping models to coordinates",
+    )
     p_world.add_argument("--days", type=int, default=1, help="days from midnight")
-    p_world.add_argument("--met", default=None,
-                         help="met CSV (time,wind_speed,wind_dir,pressure) for a "
-                              "surge forecast from the blended federated response")
-    p_world.add_argument("--altimetry", default=None,
-                         help="satellite altimetry CSV (time,lon,lat,ssh) acting "
-                              "as a virtual offshore peer")
+    p_world.add_argument(
+        "--met",
+        default=None,
+        help="met CSV (time,wind_speed,wind_dir,pressure) for a "
+        "surge forecast from the blended federated response",
+    )
+    p_world.add_argument(
+        "--altimetry",
+        default=None,
+        help="satellite altimetry CSV (time,lon,lat,ssh) acting "
+        "as a virtual offshore peer",
+    )
     p_world.set_defaults(func=cmd_world)
+
+    p_slo = sub.add_parser(
+        "slo", help="report per-station SLO compliance (met/degrading/breached; v3.1)"
+    )
+    p_slo.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
+    p_slo.add_argument(
+        "--stations",
+        default=None,
+        help="comma-separated station ids (default: all in store)",
+    )
+    p_slo.add_argument("--json", action="store_true", help="emit report as JSON")
+    p_slo.set_defaults(func=cmd_slo)
+
+    p_loop = sub.add_parser(
+        "loop", help="v3.1 autonomous standing loop: refit + reseed + sync + SLO"
+    )
+    p_loop.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
+    p_loop.add_argument(
+        "--stations",
+        default=None,
+        help="comma-separated station ids (default: all in store)",
+    )
+    p_loop.add_argument(
+        "--federation-root",
+        default=None,
+        help="global federation dir (borrow strength from peers)",
+    )
+    p_loop.add_argument(
+        "--coords", default=None, help="station,lon,lat CSV for pooling"
+    )
+    p_loop.add_argument(
+        "--ledger", default=None, help="ledger directory (default: <store>/ledger)"
+    )
+    p_loop.add_argument(
+        "--peer-id", default="local", help="this installation's peer id"
+    )
+    p_loop.add_argument(
+        "--sleep-s",
+        type=float,
+        default=600.0,
+        help="seconds between passes (0 = run once)",
+    )
+    p_loop.add_argument(
+        "--max-passes", type=int, default=1, help="passes to run (0 = run forever)"
+    )
+    p_loop.add_argument(
+        "--seed-short-min",
+        type=int,
+        default=48,
+        help="n_obs below which a record is reseeded from the pool",
+    )
+    p_loop.add_argument(
+        "--coverage-target",
+        type=float,
+        default=0.90,
+        help="minimum empirical CI coverage (0..1)",
+    )
+    p_loop.add_argument(
+        "--coverage-tol",
+        type=float,
+        default=0.05,
+        help="grace below target before 'breached'",
+    )
+    p_loop.add_argument(
+        "--rmse-target",
+        type=float,
+        default=None,
+        help="max acceptable rolling RMSE (m)",
+    )
+    p_loop.add_argument(
+        "--rmse-tol",
+        type=float,
+        default=0.05,
+        help="grace above target before 'breached'",
+    )
+    p_loop.add_argument("--datum", default="MLLW", help="NOAA vertical datum")
+    p_loop.add_argument(
+        "--alpha",
+        type=float,
+        default=0.05,
+        help="selection significance for auto-refit",
+    )
+    p_loop.add_argument(
+        "--no-auto-refit",
+        dest="auto_refit",
+        action="store_false",
+        help="only report staleness, never refit",
+    )
+    p_loop.set_defaults(func=cmd_loop)
     return ap
 
 
@@ -1857,8 +2498,11 @@ def cmd_ledger(args) -> int:
 
     path = os.path.join(args.store, f"{args.station}.ledger.json")
     if not os.path.exists(path):
-        print(f"tideglass ledger: no ledger for station {args.station!r} "
-              f"(looked in {args.store!r})", file=sys.stderr)
+        print(
+            f"tideglass ledger: no ledger for station {args.station!r} "
+            f"(looked in {args.store!r})",
+            file=sys.stderr,
+        )
         return 2
     ledger = DecisionLedger.load(path)
     if args.outcome:

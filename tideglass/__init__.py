@@ -88,7 +88,14 @@ from tideglass.marea.met import (
 )
 from tideglass.marea.model import Prediction, TideModel
 from tideglass.marea.nowcast import NowcastEngine, UpdateLog
-from tideglass.marea.ops import OpsReport, cold_start, poll, rerun
+from tideglass.marea.ops import (
+    AutonomousLoop,
+    AutonomousReport,
+    OpsReport,
+    cold_start,
+    poll,
+    rerun,
+)
 from tideglass.marea.plugins import (
     all_constituents,
     find,
@@ -102,6 +109,7 @@ from tideglass.marea.pooling import HierarchicalPool, PooledConstituent
 from tideglass.marea.qc import QcConfig, QcReport, clean_series, qc_check
 from tideglass.marea.regimes import RegimeCalibration, learn_regime_calibration
 from tideglass.marea.residual import ResidualModel, learn_residual
+from tideglass.marea.slo import SloConfig, SloMonitor, SloReport
 from tideglass.marea.tpxo import (
     format_self_check,
     native_to_model,
@@ -122,6 +130,8 @@ __all__ = [
     "Advice",
     "AltimetryTrack",
     "ArtifactStore",
+    "AutonomousLoop",
+    "AutonomousReport",
     "Constituent",
     "CostLoss",
     "DecisionCurve",
@@ -150,6 +160,9 @@ __all__ = [
     "ResidualModel",
     "ResponseTransfer",
     "SkewSurge",
+    "SloConfig",
+    "SloMonitor",
+    "SloReport",
     "StationWatch",
     "SurgeForecast",
     "SurgeResponse",
