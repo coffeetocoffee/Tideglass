@@ -658,14 +658,21 @@ class GlobalFederation:
         return HierarchicalPool(models, coords=coords, trust=trust)
 
     def seed(self, station: str, times: Sequence, heights: Sequence[float],
-             coords: tuple[float, float] | None = None) -> TideModel:
+             coords: tuple[float, float] | None = None,
+             network_coords: dict[str, tuple[float, float]] | None = None) -> TideModel:
         """Seed a (typically short) new station against the global prior."""
         models = self.models()
         if len(models) < 2:
             # No federated neighbours yet: fall back to a standalone local fit.
             return TideModel.fit(list(times), heights, station=station,
                                  source="local")
-        pool = self.global_pool(coords={station: coords} if coords else None)
+        if network_coords is None:
+            pool = self.global_pool()
+        else:
+            pool = self.global_pool(coords={
+                key: value for key, value in network_coords.items()
+                if key in models
+            })
         return pool.seed_short(list(times), heights, station, coords)
 
     def residual_summary(self) -> dict | None:
@@ -1195,6 +1202,153 @@ def pool_gpd(gpds, rates: list[float] | None = None,
     scale = float((w @ scales) / float(w.sum()))
     loc = float(np.max(locs))
     return GPD(loc=loc, scale=scale, shape=shape, n_peaks=n_peaks)
+
+
+# ---------------------------------------------------------------------------
+# v3.2 — Relay peer (hosted federation relay)
+# ---------------------------------------------------------------------------
+# The relay is a lightweight public store for peer bundles so installations
+# never need to reach each other directly. It stores manifests + bundles,
+# serves round-robin merge, applies staleness decay, and lets clients pull
+# the latest bundles. Peer trust (v2.1) already does the immune-system part
+# at the client; the relay is just storage + discovery.
+
+_RELAY_SCHEMA = "tideglass.federated.relay/v1"
+
+
+@dataclass
+class RelayPeer:
+    """A lightweight federation relay server (v3.2).
+
+    Stores peer bundles under ``<root>/peers`` and serves them via a simple
+    file-based protocol. No authentication, no encryption — the peer trust
+    scoring (``GlobalFederation.peer_trust``) happens at the client, so a
+    malicious relay cannot poison your regional prior without detection.
+
+    Operations:
+    - ``push(bundle)``: store a peer bundle (overwrites same peer_id)
+    - ``manifest(peer_id)``: get one peer's manifest (digests + bundle_sha256)
+    - ``manifest_all()``: get all peer manifests for round-robin merge
+    - ``pull(peer_id)``: fetch a full peer bundle
+    - ``stale(peer_id, max_age_days)``: check if a peer's bundle is stale
+    - ``prune(max_age_days)``: remove bundles older than ``max_age_days``
+    """
+
+    root: str
+
+    def __post_init__(self):
+        self.peers_dir = os.path.join(self.root, "peers")
+        os.makedirs(self.peers_dir, exist_ok=True)
+
+    def push(self, bundle: PeerBundle) -> str:
+        """Store a peer bundle, returning the bundle digest."""
+        path = os.path.join(self.peers_dir, f"{bundle.peer_id}.json")
+        bundle.save(path)
+        mf = bundle.manifest()
+        return mf["bundle_sha256"]
+
+    def manifest(self, peer_id: str) -> dict | None:
+        """Get one peer's manifest (or None if not found)."""
+        path = os.path.join(self.peers_dir, f"{peer_id}.json")
+        if not os.path.exists(path):
+            return None
+        try:
+            b = PeerBundle.load(path)
+            return b.manifest()
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def manifest_all(self) -> dict[str, dict]:
+        """All peer manifests for round-robin merge."""
+        out = {}
+        if not os.path.isdir(self.peers_dir):
+            return out
+        for fn in sorted(os.listdir(self.peers_dir)):
+            if not fn.endswith(".json"):
+                continue
+            pid = fn[:-5]
+            mf = self.manifest(pid)
+            if mf is not None:
+                out[pid] = mf
+        return out
+
+    def pull(self, peer_id: str) -> PeerBundle | None:
+        """Fetch a full peer bundle (or None if not found)."""
+        path = os.path.join(self.peers_dir, f"{peer_id}.json")
+        if not os.path.exists(path):
+            return None
+        try:
+            return PeerBundle.load(path)
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def stale(self, peer_id: str, max_age_days: float = 30.0) -> bool:
+        """Check if a peer's bundle is older than ``max_age_days``."""
+        if max_age_days < 0.0:
+            raise ValueError("max_age_days must be >= 0")
+        bundle = self.pull(peer_id)
+        if bundle is None:
+            return True
+        try:
+            generated = datetime.fromisoformat(bundle.generated_at.replace("Z", "+00:00"))
+            if generated.tzinfo is None:
+                generated = generated.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - generated).total_seconds() / 86400.0
+            return age > max_age_days
+        except (TypeError, ValueError):
+            return True
+
+    def prune(self, max_age_days: float = 30.0) -> list[str]:
+        """Remove bundles older than ``max_age_days``; return removed peer_ids."""
+        if max_age_days < 0.0:
+            raise ValueError("max_age_days must be >= 0")
+        removed = []
+        if not os.path.isdir(self.peers_dir):
+            return removed
+        for fn in sorted(os.listdir(self.peers_dir)):
+            if not fn.endswith(".json"):
+                continue
+            pid = fn[:-5]
+            bundle = self.pull(pid)
+            if bundle is None:
+                continue
+            try:
+                generated = datetime.fromisoformat(
+                    bundle.generated_at.replace("Z", "+00:00"))
+                if generated.tzinfo is None:
+                    generated = generated.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - generated).total_seconds() / 86400.0
+                if age > max_age_days:
+                    os.remove(os.path.join(self.peers_dir, fn))
+                    removed.append(pid)
+            except (TypeError, ValueError):
+                continue
+        return removed
+
+
+def _relay_client(relay: str) -> RelayPeer:
+    """Resolve a supported relay endpoint.
+
+    ``file://`` is the dependency-free relay transport used by v3.2. HTTP(S)
+    URLs are accepted by the CLI parser but rejected here rather than silently
+    treated as local paths; a hosted HTTP relay can be added without changing
+    the bundle/manifest protocol.
+    """
+    from urllib.parse import unquote, urlparse
+
+    parsed = urlparse(relay)
+    if parsed.scheme == "file":
+        root = unquote(parsed.path)
+        if os.name == "nt" and len(root) >= 3 and root[0] == "/" and root[2] == ":":
+            root = root[1:]
+    elif parsed.scheme in ("http", "https"):
+        raise ValueError(
+            "HTTP relay endpoints are not implemented; use a local file:// relay")
+    elif parsed.scheme:
+        raise ValueError(f"unsupported relay endpoint: {relay!r}")
+    else:
+        root = relay
+    return RelayPeer(os.path.abspath(root))
 
 
 def _surge_blend(responses: list[SurgeResponse],
