@@ -2490,7 +2490,207 @@ def build_parser() -> argparse.ArgumentParser:
         help="only report staleness, never refit",
     )
     p_loop.set_defaults(func=cmd_loop)
+
+    p_join = sub.add_parser(
+        "join", help="bootstrap a new deployment from the federation relay (v3.2)"
+    )
+    p_join.add_argument(
+        "--relay", required=True,
+        help="relay endpoint (local file:// directory; HTTP reserved)",
+    )
+    p_join.add_argument("--peer-id", required=True, help="this installation's peer id")
+    p_join.add_argument(
+        "--store", default=DEFAULT_STORE, help="local artifact directory"
+    )
+    p_join.add_argument(
+        "--coords",
+        default=None,
+        help="station,lon,lat CSV mapping local stations to coordinates",
+    )
+    p_join.add_argument(
+        "--max-age-days",
+        type=float,
+        default=30.0,
+        help="ignore relay bundles older than this (staleness decay)",
+    )
+    p_join.add_argument(
+        "--seed-short-min",
+        type=int,
+        default=48,
+        help="n_obs below which local records are reseeded from the global prior",
+    )
+    p_join.add_argument(
+        "--no-export",
+        action="store_true",
+        help="pull and seed only; do not publish this deployment's bundle",
+    )
+    p_join.set_defaults(func=cmd_join)
     return ap
+
+
+def _load_coords_for_join(path: str | None) -> dict[str, tuple[float, float]]:
+    if path is None:
+        return {}
+    out = {}
+    with open(path, newline="") as fh:
+        for row in csv.reader(fh):
+            if not row or not row[0].strip() or row[0].strip().startswith("#"):
+                continue
+            parts = [p.strip() for p in row[:3]]
+            if len(parts) < 3:
+                continue
+            try:
+                out[parts[0]] = (float(parts[1]), float(parts[2]))
+            except ValueError:
+                continue
+    return out
+
+
+def _pull_relay_bundles(relay, max_age_days: float) -> tuple[list, int]:
+    bundles = []
+    skipped = 0
+    for peer_id, manifest in relay.manifest_all().items():
+        if relay.stale(peer_id, max_age_days):
+            skipped += 1
+            continue
+        bundle = relay.pull(peer_id)
+        if bundle is None:
+            skipped += 1
+            continue
+        if bundle.manifest()["bundle_sha256"] != manifest["bundle_sha256"]:
+            raise ValueError(f"relay manifest mismatch for {peer_id}")
+        bundles.append(bundle)
+    return bundles, skipped
+
+
+def cmd_join(args) -> int:
+    from tideglass.marea.federation import GlobalFederation, _relay_client
+    from tideglass.marea.nowcast import NowcastEngine, save_state
+    from tideglass.marea.ops import _artifact_bundle, _fleet_stations, _paths, _seat_engine
+    from tideglass.marea.provenance import provenance
+
+    if args.max_age_days < 0.0:
+        print("tideglass join: --max-age-days must be >= 0", file=sys.stderr)
+        return 2
+    if args.seed_short_min < 0:
+        print("tideglass join: --seed-short-min must be >= 0", file=sys.stderr)
+        return 2
+    try:
+        relay = _relay_client(args.relay)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass join: {exc}", file=sys.stderr)
+        return 2
+
+    os.makedirs(args.store, exist_ok=True)
+    federation_root = os.path.join(args.store, "federation")
+    fed = GlobalFederation(federation_root)
+    coords = _load_coords_for_join(args.coords)
+    try:
+        bundles, skipped = _pull_relay_bundles(relay, args.max_age_days)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass join: relay pull failed: {exc}", file=sys.stderr)
+        return 2
+    pulled = 0
+    for bundle in bundles:
+        try:
+            delta = fed.ingest(bundle)
+            pulled += 0 if delta.is_empty else 1
+        except ValueError as exc:
+            print(f"tideglass join: skipping {bundle.peer_id}: {exc}", file=sys.stderr)
+            skipped += 1
+
+    reseeded = 0
+    local_models = {}
+    for station in _fleet_stations(args.store):
+        model_path = os.path.join(args.store, f"{station}.json")
+        try:
+            with open(model_path) as fh:
+                raw = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        try:
+            model = TideModel.load_harmonic(model_path)
+        except (OSError, ValueError, KeyError):
+            continue
+        local_models[station] = model
+        if int(model.meta.get("n_obs", 0) or 0) >= args.seed_short_min:
+            continue
+        times = []
+        try:
+            state_path = _paths(args.store, station)["nowcast"]
+            if os.path.exists(state_path):
+                from tideglass.marea.nowcast import NowcastState
+
+                state = NowcastState.from_dict(json.load(open(state_path)))
+                eng = NowcastEngine.from_state(model, state)
+            else:
+                eng = _seat_engine(model, args.store, station)
+            times, heights = eng.history_data()
+        except (OSError, ValueError, KeyError):
+            times, heights = [], []
+        if len(times) < 2:
+            try:
+                from tideglass.marea.crowdsource import GaugeStore
+
+                gauge = GaugeStore(args.store)
+                times, heights, _ = gauge.load(station)
+            except (OSError, ValueError, KeyError):
+                times, heights = [], []
+        if len(times) < 2:
+            continue
+        try:
+            pooled = fed.seed(
+                station, times, heights,
+                coords=coords.get(station), network_coords=coords,
+            )
+        except (TypeError, ValueError) as exc:
+            print(f"tideglass join: could not reseed {station}: {exc}", file=sys.stderr)
+            skipped += 1
+            continue
+        pooled.meta.update(
+            provenance(times, heights, station=station, source="join-reseed")
+        )
+        pooled.meta["pool_source"] = pooled.source
+        pooled.meta["seeded_from"] = sorted(fed.peers())
+        pooled.meta["refit_history"] = list(model.meta.get("refit_history", []))
+        pooled.meta["refit_history"].append(
+            {
+                "source": "join-reseed",
+                "obs_start": pooled.meta.get("obs_start"),
+                "obs_end": pooled.meta.get("obs_end"),
+                "n_obs": pooled.meta.get("n_obs"),
+                "data_sha256": pooled.meta.get("data_sha256"),
+            }
+        )
+        with open(os.path.join(args.store, f"{station}.json"), "w") as fh:
+            json.dump(pooled.to_artifact(), fh, indent=2)
+        save_state(NowcastEngine(pooled), _paths(args.store, station)["nowcast"])
+        local_models[station] = pooled
+        reseeded += 1
+
+    if not args.no_export:
+        try:
+            bundle = _artifact_bundle(args.store, args.peer_id)
+            if bundle.stations:
+                relay.push(bundle)
+        except (OSError, ValueError) as exc:
+            print(f"tideglass join: export failed: {exc}", file=sys.stderr)
+            return 2
+
+    report = fed.report()
+    print(
+        f"relay: {args.relay}  peer_id: {args.peer_id}  "
+        f"pulled: {pulled}  stale_skipped: {skipped}"
+    )
+    print(
+        f"federation: {report['n_peers']} peer(s), {report['n_stations']} station(s)"
+    )
+    print(f"local: {len(local_models)} model(s), reseeded: {reseeded}")
+    if skipped:
+        print(f"skipped: {skipped} stale, invalid, or unusable item(s)")
+    if not args.no_export:
+        print("exported: local bundle published to relay")
+    return 0
 
 
 def cmd_ledger(args) -> int:
