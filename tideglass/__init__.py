@@ -7,7 +7,7 @@ surface adds export feeds, a stdlib HTTP API, and a terminal dashboard.
 
 from tideglass import marea, marine
 
-__version__ = "2.3.0"
+__version__ = "3.0.0"
 from tideglass.marea.bench_global import compare, global_model_at, read_harmonic_grid
 from tideglass.marea.calibration import (
     conformal_quantile,
@@ -110,6 +110,7 @@ from tideglass.marea.tpxo import (
     tpxo_model_at,
 )
 from tideglass.marea.transfer import ResponseTransfer, TransferCoefficients
+from tideglass.marea.world import AltimetryTrack, WorldModel, WorldPrediction
 from tideglass.marine.advisor import Advice, TideAdvisor
 from tideglass.marine.alerting import StationWatch, surge_events
 from tideglass.tui import build_dashboard
@@ -119,6 +120,7 @@ __all__ = [
     "CATALOG",
     "GPD",
     "Advice",
+    "AltimetryTrack",
     "ArtifactStore",
     "Constituent",
     "CostLoss",
@@ -156,6 +158,8 @@ __all__ = [
     "TransferCoefficients",
     "TrustLedger",
     "UpdateLog",
+    "WorldModel",
+    "WorldPrediction",
     "add_harmonic_file",
     "all_constituents",
     "annual_rate",

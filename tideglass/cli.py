@@ -1372,6 +1372,82 @@ def cmd_extremes(args) -> int:
 
 
 
+def cmd_world(args) -> int:
+    import numpy as np
+
+    from tideglass.marea.met import read_met_csv
+    from tideglass.marea.world import AltimetryTrack, WorldModel
+
+    try:
+        day = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        print(f"tideglass world: bad date {args.date!r} (want YYYY-MM-DD)",
+              file=sys.stderr)
+        return 2
+    times = [day + timedelta(hours=h) for h in range(max(1, int(args.days)) * 24)]
+
+    altimetry = None
+    if args.altimetry:
+        try:
+            altimetry = AltimetryTrack.from_csv(args.altimetry)
+        except (OSError, ValueError) as exc:
+            print(f"tideglass world: {exc}", file=sys.stderr)
+            return 2
+    try:
+        wm = WorldModel.from_artifacts(
+            args.store, coords=args.coords, altimetry=altimetry)
+    except (OSError, ValueError) as exc:
+        print(f"tideglass world: {exc}", file=sys.stderr)
+        return 2
+    if not wm.models:
+        print(f"tideglass world: no models found in {args.store!r} "
+              "(need <station>.json artifacts and a coords file)", file=sys.stderr)
+        return 2
+
+    met = None
+    if args.met:
+        try:
+            mt, ws, wd, pr = read_met_csv(args.met)
+        except (OSError, ValueError) as exc:
+            print(f"tideglass world: {exc}", file=sys.stderr)
+            return 2
+        if len(mt) >= 2:
+            t0 = times[0]
+            th = np.array([(t - t0).total_seconds() / 3600.0 for t in times])
+            mh = np.array([(t - mt[0]).total_seconds() / 3600.0 for t in mt])
+            ws_i = np.interp(th, mh, np.asarray(ws, dtype=float))
+            wd_i = np.interp(th, mh, np.asarray(wd, dtype=float))
+            pr_i = np.interp(th, mh, np.asarray(pr, dtype=float))
+            met = (ws_i, wd_i, pr_i)
+
+    try:
+        pred = wm.predict(args.lon, args.lat, times, met=met)
+    except (ValueError, OSError) as exc:
+        print(f"tideglass world: {exc}", file=sys.stderr)
+        return 2
+
+    n = len(times)
+    print(f"# lon={args.lon} lat={args.lat} date={args.date} n={n}")
+    comp = pred.components
+    print(f"# network: {comp['n_stations']} stations; "
+          f"constituents: {','.join(comp['constituents'])}")
+    if altimetry is not None:
+        print(f"# altimetry virtual peer: correction "
+              f"{float(pred.altimetry_correction[0]):+.4f} m")
+    if pred.surge_mean is not None:
+        tot = int(np.sum(np.abs(pred.surge_mean) > 0.0))
+        print(f"# surge: {tot} hours with non-zero forecast; "
+              f"mean |surge| {float(np.mean(np.abs(pred.surge_mean))):.4f} m")
+    print("# time total_m lower_m upper_m tide_m surge_m")
+    for t, m, lo, hi, tm, sm in zip(
+        times, pred.mean, pred.lower, pred.upper,
+        pred.tide_mean,
+        (pred.surge_mean if pred.surge_mean is not None else np.zeros(n))
+    ):
+        print(f"{t.isoformat()} {m:.4f} {lo:.4f} {hi:.4f} {tm:.4f} {sm:.4f}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="tideglass", description="Tide intelligence engine")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1745,15 +1821,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ledger = sub.add_parser(
         "ledger", help="audit priced decisions: report realized cost vs "
-                       "always/never baselines (v1.3)")
+                        "always/never baselines (v1.3)")
     p_ledger.add_argument("station", help="station name")
     p_ledger.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
     p_ledger.add_argument("--outcome", default=None,
-                         help="outcomes CSV (time,height) to reconcile logged "
-                              "decisions against realized water levels")
+                          help="outcomes CSV (time,height) to reconcile logged "
+                               "decisions against realized water levels")
     p_ledger.add_argument("--json", action="store_true",
-                         help="emit the report as JSON")
+                          help="emit the report as JSON")
     p_ledger.set_defaults(func=cmd_ledger)
+
+    p_world = sub.add_parser(
+        "world", help="predict the global tide+surge field at any lon/lat "
+                      "(cold-start anywhere; v3.0)")
+    p_world.add_argument("lon", type=float, help="longitude (deg)")
+    p_world.add_argument("lat", type=float, help="latitude (deg)")
+    p_world.add_argument("date", help="YYYY-MM-DD (UTC)")
+    p_world.add_argument("--store", default=DEFAULT_STORE,
+                         help="artifact directory of <station>.json models")
+    p_world.add_argument("--coords", default=None,
+                         help="station,lon,lat CSV mapping models to coordinates")
+    p_world.add_argument("--days", type=int, default=1, help="days from midnight")
+    p_world.add_argument("--met", default=None,
+                         help="met CSV (time,wind_speed,wind_dir,pressure) for a "
+                              "surge forecast from the blended federated response")
+    p_world.add_argument("--altimetry", default=None,
+                         help="satellite altimetry CSV (time,lon,lat,ssh) acting "
+                              "as a virtual offshore peer")
+    p_world.set_defaults(func=cmd_world)
     return ap
 
 

@@ -53,8 +53,10 @@ from tideglass.marea.tpxo import (
     tpxo_model_at,
 )
 from tideglass.marea.transfer import ResponseTransfer, TransferCoefficients
+from tideglass.marea.world import AltimetryTrack, WorldModel, WorldPrediction
 
 __all__ = [
+    "AltimetryTrack",
     "ArtifactStore",
     "DecisionLedger",
     "EOFResult",
@@ -75,6 +77,8 @@ __all__ = [
     "TideModel",
     "TransferCoefficients",
     "UpdateLog",
+    "WorldModel",
+    "WorldPrediction",
     "astronomy",
     "bench_global",
     "calibration",

@@ -6,6 +6,29 @@ All notable changes to Tideglass are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added — v3.0 "The living world model"
+- **Global coastal tide+surge field** (`marea/world.py`) — the kriged regional
+  fields (v0.7) fuse with the federated peer network into one continuously-
+  updating field that predicts at **any lon/lat, any time, with no local
+  gauge** — a cold start anywhere on Earth. `WorldModel` kriges each harmonic
+  coefficient across the station network (a great-circle GP over the union
+  constituents — those present in ≥2 stations, with missing ones filled from
+  the inverse-variance regional prior) and rebuilds the tide at the query
+  point; the prediction carries a genuine spatial uncertainty band that widens
+  offshore. `predict(..., met=(wind_speed, wind_dir, pressure))` layers the
+  precision-blended federated `SurgeResponse` (v2.3) on as a surge forecast.
+- **Satellite altimetry as a virtual peer** — `AltimetryTrack`
+  (`time,lon,lat,ssh` CSV) contributes offshore sea-surface-height samples:
+  each sample's `ssh − tide` residual is kriged back onto the query point to
+  constrain the non-tidal field where no gauge exists.
+- **`tideglass world <lon> <lat> <date>`** — predict the world field at any
+  point (`--store` of `<station>.json` artifacts, `--coords` mapping,
+  `--met` forecast forcing, `--altimetry` track CSV, `--days`).
+- Builders: `WorldModel.from_artifacts(store, coords=...)` (model artifacts +
+  `station,lon,lat` CSV or a `GaugeStore`) and `WorldModel.from_gauge_store`.
+- Top-level exports (additive, contract stays `1.0`): `WorldModel`,
+  `WorldPrediction`, `AltimetryTrack`.
+
 ### Added — v2.2 "Reproducibility as a feature"
 - **Content-addressed artifact store** (`marea/cas.py`) — every fitted model is
   now stored under a content address: the SHA-256 of its canonical record
