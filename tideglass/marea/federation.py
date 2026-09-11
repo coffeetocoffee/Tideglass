@@ -27,9 +27,11 @@ import numpy as np
 
 from tideglass.marea import constituents as CON
 from tideglass.marea.crowdsource import GaugeStore
+from tideglass.marea.met import MetResponse, SurgeForecast
 from tideglass.marea.model import Fit, TideModel
 from tideglass.marea.pooling import HierarchicalPool
 from tideglass.marea.qc import QcConfig, QcReport, clean_series, qc_check
+from tideglass.marea.surge import AR1
 
 
 def trust_score(reject_rate: float, datum_m: float,
@@ -335,6 +337,8 @@ class StationContribution:
     residual_stats: dict                    # e.g. {"rmse":..., "n_obs":...}
     residual_bias: dict | None = None       # learned DoY bias table, if attached
     lineage: dict | None = None             # v2.1: {"data_sha256", "chain", "fitted_at"}
+    surge: dict | None = None               # v2.3: SurgeResponse dict, if learned
+    extremes: dict | None = None            # v2.3: {"gpd": {...}, "rate": ..., "periods": {...}}
 
 
 def _lineage_from_meta(meta: dict) -> dict | None:
@@ -412,6 +416,8 @@ class PeerBundle:
                     "residual_stats": c.residual_stats,
                     "residual_bias": c.residual_bias,
                     "lineage": c.lineage,
+                    "surge": c.surge,
+                    "extremes": c.extremes,
                 }
                 for a, c in self.stations.items()
             },
@@ -432,6 +438,8 @@ class PeerBundle:
                 residual_stats=dict(c.get("residual_stats", {})),
                 residual_bias=c.get("residual_bias"),
                 lineage=c.get("lineage"),
+                surge=c.get("surge"),
+                extremes=c.get("extremes"),
             )
         return cls(
             peer_id=d["peer_id"],
@@ -541,7 +549,24 @@ def build_peer_bundle(store_root: str, peer_id: str,
     stations: dict[str, StationContribution] = {}
     for name, m in models.items():
         alias = _alias(peer_id, name)
-        stations[alias] = _contribution_from_model(m, alias)
+        c = _contribution_from_model(m, alias)
+        # v2.3: attach a learned surge response + GPD extremes (if present) so
+        # the federation can share storm-surge behavior and pool tail fits.
+        surge_p = os.path.join(store_root, f"{name}.surge.json")
+        if os.path.exists(surge_p):
+            try:
+                with open(surge_p) as fh:
+                    c.surge = json.load(fh)
+            except (OSError, ValueError):
+                pass
+        gpd_p = os.path.join(store_root, f"{name}.gpd.json")
+        if os.path.exists(gpd_p):
+            try:
+                with open(gpd_p) as fh:
+                    c.extremes = json.load(fh)
+            except (OSError, ValueError):
+                pass
+        stations[alias] = c
     if generated_at is None:
         generated_at = datetime.now(timezone.utc).isoformat()
     return PeerBundle(
@@ -684,6 +709,77 @@ class GlobalFederation:
                     "tau_a": pr[0][1], "tau_b": pr[1][1], "n": pr[0][2]
                 }
         return out
+
+    # -- v2.3: shared surge response + federated extremes -------------------------
+
+    def surge_summary(self) -> dict | None:
+        """Aggregate every peer's learned surge response (v2.3).
+
+        Returns ``None`` if no peer bundle carries a ``surge`` block;
+        otherwise a dict with the blended :class:`SurgeResponse`, the number
+        of contributing peers/stations, and the per-coefficient spread so a
+        caller can see how coherent the installed base's responses are.
+        The blend is the transferable storm-surge model a new installation
+        seeds from.
+        """
+        pairs = []
+        n_peers = 0
+        for b in self._bundles.values():
+            ps = _peer_surge(b)
+            if ps:
+                n_peers += 1
+                pairs.extend(ps)
+        if not pairs:
+            return None
+        responses, weights = zip(*pairs)
+        blended = _surge_blend(list(responses), list(weights))
+        return {
+            "n_peers": n_peers,
+            "n_stations": self.n_stations,
+            "n_with_surge": len(pairs),
+            "blended": blended.to_dict(),
+        }
+
+    def extremes_summary(self) -> dict | None:
+        """Pool GPD tail fits across peers into one effective long record (v2.3).
+
+        A 3-year record at every deployment becomes effectively a 30-year
+        record: exceedance counts sum, the tail shape/scale are precision
+        weighted across peers. Returns ``None`` if fewer than one peer
+        carries an ``extremes`` block, otherwise the pooled
+        :class:`~tideglass.marea.extremes.GPD`, the contributing counts,
+        and the representative annual exceedance rate.
+        """
+        collected = []
+        rates = []
+        n_peers = 0
+        for b in self._bundles.values():
+            pe = _peer_extremes(b)
+            if not pe:
+                continue
+            n_peers += 1
+            for ext, w in pe:
+                collected.append((ext, w))
+                if ext.get("rate") is not None:
+                    rates.append(float(ext["rate"]))
+        if not collected:
+            return None
+        gpds = [_gpd_from_dict(ext["gpd"]) for ext, _ in collected]
+        weights = [w for _, w in collected]
+        rate_sum = float(np.mean(rates)) if rates else None
+        pooled = pool_gpd(gpds, rates=None, weights=list(weights))
+        return {
+            "n_peers": n_peers,
+            "n_stations": self.n_stations,
+            "n_with_extremes": len(collected),
+            "n_peaks_total": pooled.n_peaks,
+            "gpd": {
+                "loc": float(pooled.loc),
+                "scale": float(pooled.scale),
+                "shape": float(pooled.shape),
+            },
+            "rate_per_year": rate_sum,
+        }
 
     # -- v2.1: peer-level trust (the immune system graduates to deployments) -
 
@@ -902,6 +998,265 @@ def dp_noisify(bundle: PeerBundle, epsilon: float, delta: float = 1e-5,
                       stations=stations, meta=meta)
 
 
+# ---------------------------------------------------------------------------
+# v2.3 -- shared surge response + federated extremes
+# ---------------------------------------------------------------------------
+# SurgeResponse packages a station's learned v1.2 met response (MetResponse +
+# AR(1) tracker + optional river-discharge coupling) so it rides along inside
+# a PeerBundle. The federation's surge_summary() aggregates every peer's
+# response; a new installation seeds its initial surge model from that
+# aggregate (storm-surge behaviour is broadly transferable between similar
+# coastlines -- the v0.7 transfer trick applied to surge).
+#
+# pool_gpd() does the same idea for extremes: by pooling the GPD tail fit
+# across N deployments, a 3-year record everywhere becomes effectively a
+# 30-year record for return periods.
+
+
+DEFAULT_P_REF = 1013.25
+
+
+@dataclass
+class SurgeResponse:
+    """A station's learned surge behaviour, packaged for federation (v2.3).
+
+    Wraps the v1.2 ``MetResponse`` (wind/pressure -> surge) with the AR(1)
+    tracker layered on its unexplained residual and, for estuaries, the
+    learned river-discharge coupling. Stations bundle it as ``surge`` inside
+    a :class:`PeerBundle`; :meth:`GlobalFederation.surge_summary` aggregates
+    the installed base's responses into a single transferable model.
+    """
+
+    intercept: float  # c0 (m)
+    stress_u: float   # a (m per m^2/s^2)
+    stress_v: float   # b (m per m^2/s^2)
+    barometer: float  # beta (m per hPa)
+    lag_hours: int    # fitted forcing -> response lag (h)
+    sigma: float      # std of the met fit residuals (m)
+    r_squared: float  # variance explained by the met response
+    n: int            # samples fitted
+    p_ref: float      # pressure reference (hPa)
+    ar_phi: float | None = None       # AR(1) on unexplained residual
+    ar_sigma: float | None = None     # AR(1) innovation std
+    discharge: dict | None = None     # DischargeCoupling dict, if estuarine
+
+    def to_dict(self) -> dict:
+        d = {
+            "intercept": float(self.intercept),
+            "stress_u": float(self.stress_u),
+            "stress_v": float(self.stress_v),
+            "barometer": float(self.barometer),
+            "lag_hours": int(self.lag_hours),
+            "sigma": float(self.sigma),
+            "r_squared": float(max(self.r_squared, 0.0)),
+            "n": int(self.n),
+            "p_ref": float(self.p_ref),
+        }
+        if self.ar_phi is not None:
+            d["ar_phi"] = float(self.ar_phi)
+            d["ar_sigma"] = float(self.ar_sigma)
+        if self.discharge is not None:
+            d["discharge"] = self.discharge
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> SurgeResponse:
+        return cls(
+            intercept=float(d["intercept"]),
+            stress_u=float(d["stress_u"]),
+            stress_v=float(d["stress_v"]),
+            barometer=float(d["barometer"]),
+            lag_hours=int(d["lag_hours"]),
+            sigma=float(d["sigma"]),
+            r_squared=float(d.get("r_squared", 0.0)),
+            n=int(d["n"]),
+            p_ref=float(d.get("p_ref", DEFAULT_P_REF)),
+            ar_phi=(float(d["ar_phi"]) if "ar_phi" in d else None),
+            ar_sigma=(float(d["ar_sigma"]) if "ar_sigma" in d else None),
+            discharge=d.get("discharge"),
+        )
+
+    @classmethod
+    def from_met(cls, resp, ar=None, discharge=None) -> SurgeResponse:
+        """Build a SurgeResponse from a learned MetResponse + AR(1) state."""
+        return cls(
+            intercept=float(resp.intercept),
+            stress_u=float(resp.stress_u),
+            stress_v=float(resp.stress_v),
+            barometer=float(resp.barometer),
+            lag_hours=int(resp.lag_hours),
+            sigma=float(resp.sigma),
+            r_squared=float(resp.r_squared),
+            n=int(resp.n),
+            p_ref=float(resp.p_ref),
+            ar_phi=(float(ar.phi) if ar is not None else None),
+            ar_sigma=(float(ar.sigma_eps) if ar is not None else None),
+            discharge=(discharge.to_dict() if discharge is not None else None),
+        )
+
+    def forecast(self, times, wind_speed, wind_dir_deg, pressure,
+                 ar=None, last_residual: float = 0.0,
+                 origin=None) -> SurgeForecast:
+        """Surge forecast (m) under forecast met forcing (v2.3).
+
+        Reconstructs the underlying v1.2 :class:`MetResponse` from the
+        packaged coefficients and applies it. If ``ar`` is not supplied but
+        the response carries an AR(1) tracker, that tracker is rebuilt from
+        ``ar_phi`` / ``ar_sigma`` and layered on its unexplained residual, so
+        the forecast behaviour matches the model it was learned from. The
+        optional river-discharge coupling (stored in ``discharge``) is applied
+        separately by the caller, since it needs a discharge forcing series.
+        """
+        if ar is None and self.ar_phi is not None:
+            ar = AR1(phi=float(self.ar_phi),
+                     sigma_eps=float(self.ar_sigma or 0.0), sigma=0.0)
+        mr = MetResponse(
+            intercept=self.intercept, stress_u=self.stress_u,
+            stress_v=self.stress_v, barometer=self.barometer,
+            lag_hours=self.lag_hours, sigma=self.sigma,
+            r_squared=self.r_squared, n=self.n, p_ref=self.p_ref,
+        )
+        return mr.forecast(times, wind_speed, wind_dir_deg, pressure,
+                          ar=ar, last_residual=last_residual, origin=origin)
+
+
+def _gpd_to_dict(g) -> dict:
+    """Serialize a :class:`~tideglass.marea.extremes.GPD` to a plain dict."""
+    return {
+        "loc": float(g.loc),
+        "scale": float(g.scale),
+        "shape": float(g.shape),
+        "n_peaks": int(g.n_peaks),
+    }
+
+
+def _gpd_from_dict(d: dict):
+    """Rebuild a :class:`~tideglass.marea.extremes.GPD` from a dict."""
+    from tideglass.marea.extremes import GPD
+    return GPD(loc=float(d["loc"]), scale=float(d["scale"]),
+               shape=float(d["shape"]), n_peaks=int(d["n_peaks"]))
+
+
+
+def _gpd_return_level(gpd_dict, period_years, rate_per_year):
+    """Return level (m) for a pooled GPD dict at a given period (years).
+
+    Standard GPD-Poisson return level:  RL(T) = u + (sigma/xi)*((rate*T)^xi - 1)
+    for xi != 0, and u + sigma*ln(rate*T) in the exponential (xi -> 0) limit.
+    This matches :meth:`~tideglass.marea.extremes.GPD.return_level`. ``gpd_dict``
+    is the plain dict from :meth:`GlobalFederation.extremes_summary` (keys
+    loc/scale/shape); ``rate_per_year`` is the mean annual threshold exceedance
+    rate.
+    """
+    loc = float(gpd_dict["loc"])
+    sigma = float(gpd_dict["scale"])
+    xi = float(gpd_dict["shape"])
+    rate = float(rate_per_year)
+    if rate <= 0 or sigma <= 0:
+        return float("nan")
+    if abs(xi) < 1e-9:
+        return loc + sigma * math.log(rate * period_years)
+    inside = rate * period_years
+    if inside <= 0:
+        return float("nan")
+    return loc + sigma / xi * (inside**xi - 1)
+
+def pool_gpd(gpds, rates: list[float] | None = None,
+              weights: list[float] | None = None):
+    """Pool GPD tail fits across deployments into one (v2.3 federated extremes).
+
+    A 3-year record at every deployment becomes effectively a 30-year record:
+    exceedance counts sum, the tail shape/scale are precision-weighted across
+    peers, and the return-period rate is the representative cross-deployment
+    mean. Returns a :class:`~tideglass.marea.extremes.GPD`.
+
+    :param gpds: the per-deployment :class:`GPD` fits.
+    :param rates: matching per-deployment annual exceedance rates
+        (``annual_rate(...)``). If ``None``, each is treated as equal.
+    :param weights: optional per-deployment pooling weights (e.g. peer trust
+        or record length). Defaults to ``n_peaks`` (precision weighting).
+    """
+    from tideglass.marea.extremes import GPD
+    gpds = list(gpds)
+    if len(gpds) < 1:
+        raise ValueError("pool_gpd needs at least one GPD")
+    if rates is not None and len(rates) != len(gpds):
+        raise ValueError(f"{len(gpds)} GPDs but {len(rates)} rates")
+    w = (list(weights) if weights is not None
+         else [float(g.n_peaks) for g in gpds])
+    w = np.asarray(w, dtype=float)
+    if float(np.sum(w)) <= 0.0:
+        w = np.ones(len(gpds), dtype=float)
+    shapes = np.asarray([g.shape for g in gpds], dtype=float)
+    scales = np.asarray([g.scale for g in gpds], dtype=float)
+    locs = np.asarray([g.loc for g in gpds], dtype=float)
+    n_peaks = int(sum(g.n_peaks for g in gpds))
+    shape = float((w @ shapes) / float(w.sum()))
+    scale = float((w @ scales) / float(w.sum()))
+    loc = float(np.max(locs))
+    return GPD(loc=loc, scale=scale, shape=shape, n_peaks=n_peaks)
+
+
+def _surge_blend(responses: list[SurgeResponse],
+                 weights: list[float] | None = None) -> SurgeResponse:
+    """Precision-weight a list of SurgeResponses into one transferable model.
+
+    The response coefficients are weighted by ``n`` (sample count, as a
+    proxy for fit precision) so well-sampled stations speak louder. AR(1) and
+    discharge terms are carried through only when *every* contributor has them.
+    """
+    if not responses:
+        raise ValueError("no surge responses to blend")
+    w = np.asarray(list(weights) if weights is not None
+                   else [float(r.n) for r in responses], dtype=float)
+    if float(np.sum(w)) <= 0.0:
+        w = np.ones(len(responses), dtype=float)
+
+    def _avg(attr):
+        return float(w @ np.asarray([getattr(r, attr) for r in responses]) / w.sum())
+
+    have_ar = all(r.ar_phi is not None for r in responses)
+    have_disc = all(r.discharge is not None for r in responses)
+    return SurgeResponse(
+        intercept=_avg("intercept"),
+        stress_u=_avg("stress_u"),
+        stress_v=_avg("stress_v"),
+        barometer=_avg("barometer"),
+        lag_hours=round(_avg("lag_hours")),
+        sigma=_avg("sigma"),
+        r_squared=_avg("r_squared"),
+        n=round(_avg("n")),
+        p_ref=_avg("p_ref"),
+        ar_phi=(_avg("ar_phi") if have_ar else None),
+        ar_sigma=(_avg("ar_sigma") if have_ar else None),
+        discharge=(responses[0].discharge if have_disc else None),
+    )
+
+
+def _peer_surge(peer_bundle) -> list[tuple[SurgeResponse, float]]:
+    """Collect (SurgeResponse, weight) pairs from one peer's bundle."""
+    out = []
+    for c in peer_bundle.stations.values():
+        if not c.surge:
+            continue
+        try:
+            sr = SurgeResponse.from_dict(c.surge)
+        except (KeyError, TypeError, ValueError):
+            continue
+        out.append((sr, float(max(c.n_obs, 1))))
+    return out
+
+
+def _peer_extremes(peer_bundle) -> list[tuple[dict, float]]:
+    """Collect (extremes dict, weight) pairs from one peer's bundle."""
+    out = []
+    for c in peer_bundle.stations.values():
+        if not c.extremes or "gpd" not in c.extremes:
+            continue
+        out.append((c.extremes, float(max(c.n_obs, 1))))
+    return out
+
+
 def federate(
     store_root: str,
     station: str,
@@ -918,3 +1273,4 @@ def federate(
     fed = FederatedRefit(store_root, variance_threshold=variance_threshold)
     return fed.refit(station, lon, lat, times, heights,
                      source=source, config=config, alpha=alpha)
+

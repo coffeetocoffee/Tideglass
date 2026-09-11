@@ -913,7 +913,13 @@ def cmd_surge(args) -> int:
 
     from tideglass.marea.decision import decision_curve
     from tideglass.marea.extremes import flood_probability
-    from tideglass.marea.met import learn_met_response, read_met_csv
+    from tideglass.marea.federation import SurgeResponse
+    from tideglass.marea.met import (
+        learn_discharge_coupling,
+        learn_met_response,
+        read_discharge_csv,
+        read_met_csv,
+    )
     from tideglass.marea.surge import fit_ar1
 
     try:
@@ -954,10 +960,41 @@ def cmd_surge(args) -> int:
 
     os.makedirs(args.store, exist_ok=True)
     met_path = os.path.join(args.store, f"{station}.met.json")
+    surge_path = os.path.join(args.store, f"{station}.surge.json")
+
+    # v2.3: optionally learn a river-discharge coupling for estuaries. Fit it on
+    # the residual left unexplained by the met response (met_residual), so the
+    # discharge term is isolated cleanly from the meteorological surge.
+    discharge = None
+    if args.discharge:
+        try:
+            dt, dq = read_discharge_csv(args.discharge)
+            met_residual = resid - resp.surge(times, ws, wd, pr)
+            discharge, dcdiag = learn_discharge_coupling(
+                times, met_residual, dt, dq, tau_hours=args.discharge_tau)
+            print(f"discharge coupling: alpha={discharge.alpha:.5f}  "
+                  f"beta={discharge.beta:.3f}  "
+                  f"r2={dcdiag['r2']:.3f}  n={dcdiag['n']}")
+        except (OSError, ValueError) as exc:
+            print(f"tideglass surge: discharge coupling failed: {exc}",
+                  file=sys.stderr)
+
+    # v2.3: package a richer SurgeResponse (met + AR + discharge) for federation
+    ar = None
+    if args.forecast:
+        try:
+            ar = fit_ar1(resid)
+        except ValueError:
+            ar = None
+    surge_resp = SurgeResponse.from_met(resp, ar=ar, discharge=discharge)
+
     with open(met_path, "w") as fh:
         json.dump(resp.to_dict(), fh, indent=2)
+    with open(surge_path, "w") as fh:
+        json.dump(surge_resp.to_dict(), fh, indent=2)
 
     print(f"station: {station}  n: {diag['n']}  lag: {diag['lag']} h")
+    print(f"saved: {surge_path}")
     print("response: surge = c0 + a*tau_u + b*tau_v + beta*dp")
     print(f"  intercept: {resp.intercept:+.4f} m")
     print(f"  stress u:  {resp.stress_u:+.5f} m/(m2/s2)")
@@ -983,10 +1020,6 @@ def cmd_surge(args) -> int:
             fws = np.asarray(fws)[keep]
             fwd = np.asarray(fwd)[keep]
             fpr = np.asarray(fpr)[keep]
-        try:
-            ar = fit_ar1(resid)
-        except ValueError:
-            ar = None
         # Prepend the met history tail so the fitted lag can interpolate real
         # forcing (not clamps) for the first lag hours of the forecast.
         pre = max(resp.lag_hours + 1, 1)
@@ -994,7 +1027,7 @@ def cmd_surge(args) -> int:
         gws = np.concatenate([np.asarray(ws[-pre:]), np.asarray(fws)])
         gwd = np.concatenate([np.asarray(wd[-pre:]), np.asarray(fwd)])
         gpr = np.concatenate([np.asarray(pr[-pre:]), np.asarray(fpr)])
-        fc_all = resp.forecast(gt, gws, gwd, gpr, ar=ar,
+        fc_all = surge_resp.forecast(gt, gws, gwd, gpr, ar=ar,
                                last_residual=float(resid[-1]), origin=times[-1])
         fc_mean = np.asarray(fc_all.mean, dtype=float)[pre:]
         fc_sigma = np.asarray(fc_all.sigma, dtype=float)[pre:]
@@ -1156,6 +1189,7 @@ def cmd_pool(args) -> int:
 
 
 def cmd_extremes(args) -> int:
+
     import numpy as np
 
     from tideglass.marea.extremes import (
@@ -1166,55 +1200,176 @@ def cmd_extremes(args) -> int:
         skew_surge,
     )
 
+
+
     try:
+
         times, heights = read_csv(args.csv)
+
     except (OSError, ValueError) as exc:
+
         print(f"tideglass extremes: {exc}", file=sys.stderr)
+
         return 2
+
     order = sorted(range(len(times)), key=lambda i: times[i])
+
     times = [times[i] for i in order]
+
     y = np.array([heights[i] for i in order], dtype=float)
+
     station = args.station or os.path.splitext(os.path.basename(args.csv))[0]
+
     try:
+
         model = TideModel.fit(
+
             times, y, auto_select=not args.no_select, alpha=args.alpha,
+
             station=station)
+
         sk = skew_surge(times, y, model.predict(times).mean)
+
         thresh = float(np.quantile(sk.skew, args.threshold_q))
+
         _, kv = decluster(sk.times, sk.skew, gap_hours=args.gap_h,
+
                           threshold=thresh)
+
         g = fit_gpd(kv, threshold=thresh)
+
     except ValueError as exc:
+
         print(f"tideglass extremes: {exc}", file=sys.stderr)
+
         return 2
+
     rate = annual_rate(times, g.n_peaks)
+
     print(f"station: {station}  obs: {len(times)}  "
+
           f"high waters: {len(sk.times)}")
+
     print(f"skew surge: max={float(np.max(sk.skew)):.4f} m  "
+
           f"mean={float(np.mean(sk.skew)):.4f} m")
+
     print(f"declustered peaks: {len(kv)}  threshold: {thresh:.4f} m  "
+
           f"exceedances: {g.n_peaks}  rate: {rate:.2f}/yr")
+
     print(f"GPD: loc={g.loc:.4f} m  scale={g.scale:.4f} m  shape={g.shape:+.4f}")
+
+
+
+    # v2.3: write the GPD fit as <station>.gpd.json for federation pooling
+
+    os.makedirs(args.store, exist_ok=True)
+
+    gpd_path = os.path.join(args.store, f"{station}.gpd.json")
+
+    with open(gpd_path, "w") as fh:
+
+        json.dump({
+
+            "gpd": {"loc": float(g.loc), "scale": float(g.scale),
+
+                    "shape": float(g.shape), "n_peaks": int(g.n_peaks)},
+
+            "rate": float(rate),
+
+        }, fh, indent=2)
+
+    print(f"saved: {gpd_path}")
+
+
+
     try:
+
         periods = [float(p) for p in args.return_periods.split(",") if p.strip()]
+
     except ValueError:
+
         print("tideglass extremes: bad --return-periods "
+
               "(want e.g. '1,10,100')", file=sys.stderr)
+
         return 2
+
     print("return level (m):")
+
     for t in periods:
+
         print(f"  {t:>8g}-yr  {g.return_level(t, rate):.4f}")
+
+
+
+    # v2.3: pooled return levels from the installed base (if requested)
+
+    if args.pool and args.pool_store:
+
+        from tideglass.marea.federation import GlobalFederation, _gpd_return_level
+
+        fed = GlobalFederation(args.pool_store)
+
+        esum = fed.extremes_summary()
+
+        if esum is None:
+
+            print("pool: no peer bundles carry extremes data")
+
+        else:
+
+            pooled = esum["gpd"]
+
+            print(f"\npooled extremes ({esum['n_peers']} peers, "
+
+                  f"{esum['n_stations']} stations, "
+
+                  f"{esum['n_peaks_total']} peaks total):")
+
+            print(f"  GPD: loc={pooled['loc']:.4f} m  "
+
+                  f"scale={pooled['scale']:.4f} m  "
+
+                  f"shape={pooled['shape']:+.4f}")
+
+            if esum.get("rate_per_year") is not None:
+
+                prate = esum["rate_per_year"]
+
+                print(f"  rate: {prate:.2f}/yr")
+
+                for t in periods:
+
+                    rl = _gpd_return_level(pooled, t, prate)
+
+                    print(f"  {t:>8g}-yr  {rl:.4f} m")
+
+
+
     resid = y - model.predict(times).mean
+
     total = model.predict(times).mean + resid
+
     levels = sorted({float(np.quantile(total, 0.99)),
+
                      float(np.quantile(total, 0.999))}
+
                     | ({float(args.flood)} if args.flood is not None else set()))
+
     print("joint exceedance P(tide+surge > level):")
+
     for z in levels:
+
         p = joint_exceedance_probability(
+
             model.predict(times).mean, resid, z)
+
         print(f"  {z:7.4f} m  p_hour={p:.6f}  ~{p * 8760.0:.1f} h/yr")
+
     return 0
+
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1513,7 +1668,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ext.add_argument("--return-periods", default="1,2,5,10,25,50,100",
                        help="comma-separated return periods (years)")
     p_ext.add_argument("--flood", type=float, default=None,
-                       help="alarm level (m) for the joint-exceedance table")
+                        help="alarm level (m) for the joint-exceedance table")
+    p_ext.add_argument("--store", default=DEFAULT_STORE, help="artifact directory")
+    p_ext.add_argument("--pool", action="store_true",
+                       help="print pooled return levels from the installed base")
+    p_ext.add_argument("--pool-store", default=DEFAULT_STORE,
+                       help="federation store (under --pool) holding peer bundles")
     p_ext.set_defaults(func=cmd_extremes)
 
     p_rep = sub.add_parser(
@@ -1572,9 +1732,15 @@ def build_parser() -> argparse.ArgumentParser:
                               "--loss, prices the act/wait decision (needs "
                               "--flood)")
     p_surge.add_argument("--loss", type=float, default=None,
-                         help="loss if the event hits an unprepared hour; "
-                              "with --cost, prices the act/wait decision "
-                              "(needs --flood)")
+                          help="loss if the event hits an unprepared hour; "
+                               "with --cost, prices the act/wait decision "
+                               "(needs --flood)")
+    p_surge.add_argument("--discharge", default=None,
+                         help="estuary river-discharge CSV (time,discharge) to "
+                              "learn a coupling for (v2.3)")
+    p_surge.add_argument("--discharge-tau", type=int, default=48,
+                         help="antecedent averaging window (hours) for the "
+                              "discharge coupling (v2.3)")
     p_surge.set_defaults(func=cmd_surge)
 
     p_ledger = sub.add_parser(

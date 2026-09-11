@@ -36,6 +36,7 @@ wind_dir,pressure`` — ISO datetimes, wind speed m/s, wind direction degrees
 from __future__ import annotations
 
 import csv
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -378,3 +379,221 @@ def write_met_csv(rows, path: str) -> None:
         w.writerow(["time", "wind_speed", "wind_dir", "pressure"])
         for t, s, d, p in rows:
             w.writerow([t.isoformat(), f"{s:.2f}", f"{d:.1f}", f"{p:.2f}"])
+
+
+# ---------------------------------------------------------------------------
+# v2.3 — estuarine river-discharge coupling
+# ---------------------------------------------------------------------------
+# In estuaries, a fraction of the residual water level is driven by antecedent
+# river discharge (Q), not local weather. If ignored, that component inflates the
+# met-response's ``sigma`` and biases its coefficients. This models it
+# additively on the *met-unexplained* residual and learns it by least squares.
+#
+# Discharge CSV (any source, e.g. USGS): ``time,discharge`` -- ISO datetimes,
+# discharge in m^3/s.
+
+
+def _rolling_mean(x: np.ndarray, win: int) -> np.ndarray:
+    """Trailing uniform rolling mean with window ``win`` (samples)."""
+    if win <= 1:
+        return x.copy()
+    if win >= x.size:
+        return np.full_like(x, float(np.mean(x)))
+    cs = np.cumsum(np.concatenate([[0.0], x]))
+    out = np.empty_like(x)
+    w = int(win)
+    out[: w - 1] = cs[1:w] / np.arange(1, w, dtype=float)
+    out[w - 1 :] = (cs[w:] - cs[:-w]) / float(w)
+    return out
+
+
+def _golden_section_1d(f, lo: float, hi: float, tol: float = 1e-7,
+                       maxiter: int = 500) -> float:
+    """Dependency-free golden-section minimiser over ``[lo, hi]``."""
+    gr = 0.5 * (math.sqrt(5.0) - 1.0)
+    a, b = float(lo), float(hi)
+    c = b - gr * (b - a)
+    d = a + gr * (b - a)
+    fc, fd = f(c), f(d)
+    for _ in range(maxiter):
+        if abs(b - a) < tol * (abs(c) + abs(d) + 1e-9):
+            break
+        if fc < fd:
+            b, d, fd = d, c, fc
+            c = b - gr * (b - a)
+            fc = f(c)
+        else:
+            a, c, fc = c, d, fd
+            d = a + gr * (b - a)
+            fd = f(d)
+    return 0.5 * (a + b)
+
+
+@dataclass
+class DischargeCoupling:
+    """Learned estuarine surge coupling to river discharge (v2.3).
+
+    Models the discharge-driven component additively::
+
+        surge_estuary(t) += alpha * Q_antecedent(t)^beta
+
+    where ``Q_antecedent`` is a trailing mean of recent discharge (window
+    ``tau_hours``) capturing the catchment's memory, and ``beta < 1`` reflects
+    sublinear channel storage. ``alpha > 0`` (discharge only pushes water up).
+    """
+
+    alpha: float  # m of surge per (m^3/s)^beta
+    beta: float  # exponent (sublinear)
+    tau_hours: int  # antecedent averaging window (h)
+    sigma: float  # residual std after coupling (m)
+    r_squared: float  # variance explained by the coupling term
+    n: int  # samples fitted
+
+    def apply(self, times, discharge_times, discharge) -> np.ndarray:
+        """Mean discharge-driven surge (m) at ``times``."""
+        times = list(times)
+        q = _rolling_mean(np.asarray(discharge, dtype=float).ravel(),
+                          max(1, self.tau_hours))
+        h_times = _hours_since(times[0], times)
+        h_disc = _hours_since(next(iter(discharge_times)), list(discharge_times))
+        q_at_t = np.interp(h_times, h_disc, q)
+        return self.alpha * np.maximum(q_at_t, 0.0) ** self.beta
+
+    def to_dict(self) -> dict:
+        return {
+            "alpha": float(self.alpha),
+            "beta": float(self.beta),
+            "tau_hours": int(self.tau_hours),
+            "sigma": float(self.sigma),
+            "r_squared": float(max(self.r_squared, 0.0)),
+            "n": int(self.n),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> DischargeCoupling:
+        return cls(
+            alpha=float(d["alpha"]),
+            beta=float(d["beta"]),
+            tau_hours=int(d["tau_hours"]),
+            sigma=float(d["sigma"]),
+            r_squared=float(d.get("r_squared", 0.0)),
+            n=int(d["n"]),
+        )
+
+
+def learn_discharge_coupling(
+    times: Sequence[datetime],
+    met_residual,
+    discharge_times: Sequence[datetime],
+    discharge,
+    tau_hours: int = 48,
+) -> tuple[DischargeCoupling, dict]:
+    """Fit the discharge-driven component of an estuarine residual (v2.3).
+
+    ``met_residual`` is the *unexplained* residual left by the v1.2 met
+    response (``surge - MetResponse.surge(...)``), so the discharge term is
+    isolated cleanly. Returns ``(DischargeCoupling, diagnostics)``.
+    """
+    times = list(times)
+    y = np.asarray(met_residual, dtype=float).ravel()
+    if y.size != len(times):
+        raise ValueError(f"{len(times)} times but {y.size} residual samples")
+    if y.size < _MIN_OBS:
+        raise ValueError(
+            f"record too short to learn discharge coupling (need >= {_MIN_OBS}, "
+            f"got {y.size})")
+    if tau_hours <= 0:
+        raise ValueError("tau_hours must be positive")
+    q_raw = np.asarray(discharge, dtype=float).ravel()
+    h_disc = _hours_since(next(iter(discharge_times)), list(discharge_times))
+    q = _rolling_mean(q_raw, max(1, tau_hours))
+    h_times = _hours_since(times[0], times)
+    q_at_t = np.maximum(np.interp(h_times, h_disc, q), 0.0)
+    y_var = float(np.var(y))
+    if y_var < 1e-12:
+        raise ValueError("met residual is constant; nothing to couple")
+
+    pos = q_at_t > 0.0
+    qpos, ypos = q_at_t[pos], y[pos]
+    if qpos.size < max(_MIN_OBS // 2, 8):
+        raise ValueError(
+            f"discharge series does not cover the observation window "
+            f"({int(pos.sum())} positive samples, need >= {max(_MIN_OBS // 2, 8)})")
+    qv = float(np.var(qpos))
+    if qv < 1e-12:
+        raise ValueError("discharge variance is zero over the window")
+
+    def _ss(beta: float) -> float:
+        qb = qpos ** float(beta)
+        den = float(qb @ qb)
+        if den == 0.0:
+            return math.inf
+        a = float((qb @ ypos) / den)
+        if a < 0.0:
+            return math.inf  # physical: discharge pushes water up
+        resid = y - a * q_at_t ** float(beta)
+        return float(resid @ resid)
+
+    beta = _golden_section_1d(_ss, 0.05, 2.0)
+    qb = qpos ** beta
+    alpha = float((qb @ ypos) / float(qb @ qb))
+    alpha = max(alpha, 0.0)
+    resid_all = y - alpha * q_at_t ** beta
+    ss_res = float(resid_all @ resid_all)
+    r2 = max(0.0, 1.0 - ss_res / (y_var * y.size))
+    sigma = float(np.std(resid_all, ddof=2)) if y.size > 2 \
+        else float(np.std(resid_all))
+    dc = DischargeCoupling(alpha=alpha, beta=beta,
+                           tau_hours=int(tau_hours),
+                           sigma=sigma, r_squared=r2, n=int(y.size))
+    diag = {
+        "n": int(y.size),
+        "tau_hours": int(tau_hours),
+        "beta": beta,
+        "alpha": alpha,
+        "r2": r2,
+        "sigma": sigma,
+        "rmse_before": float(np.sqrt(np.mean(y ** 2))),
+        "rmse_after": float(np.sqrt(np.mean(resid_all ** 2))),
+    }
+    return dc, diag
+
+
+def read_discharge_csv(path: str):
+    """Read a ``time,discharge`` CSV (ISO datetimes, m^3/s).
+
+    Header-aware: columns are matched by name when a ``time`` header is
+    present, otherwise the canonical ``time,discharge`` order is assumed.
+    Blank/unparsable rows are skipped. Returns ``(times, discharge)``.
+    """
+    wanted = {"time": None, "discharge": None}
+    times: list[datetime] = []
+    vals: list[float] = []
+    with open(path, newline="") as fh:
+        rows = list(csv.reader(fh))
+    cols = None
+    for row in rows:
+        if not row or all(not c.strip() for c in row):
+            continue
+        if cols is None:
+            head = [c.strip().lower() for c in row]
+            if "time" in head:
+                for key in wanted:
+                    wanted[key] = head.index(key) if key in head else None
+                if wanted["time"] is None or wanted["discharge"] is None:
+                    raise ValueError(
+                        f"{path!r}: discharge CSV needs 'time' and "
+                        "'discharge' columns")
+                cols = wanted
+                continue
+            cols = {"time": 0, "discharge": 1}
+        try:
+            t = _parse_iso(row[cols["time"]])
+            v = float(row[cols["discharge"]])
+        except (ValueError, IndexError):
+            continue
+        times.append(t)
+        vals.append(v)
+    if not times:
+        raise ValueError(f"no readable discharge rows in {path!r}")
+    return times, np.asarray(vals, dtype=float)

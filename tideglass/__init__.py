@@ -7,7 +7,7 @@ surface adds export feeds, a stdlib HTTP API, and a terminal dashboard.
 
 from tideglass import marea, marine
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 from tideglass.marea.bench_global import compare, global_model_at, read_harmonic_grid
 from tideglass.marea.calibration import (
     conformal_quantile,
@@ -61,9 +61,11 @@ from tideglass.marea.federation import (
     PeerBundle,
     PeerDelta,
     PeerTrustScore,
+    SurgeResponse,
     TrustLedger,
     dp_noisify,
     federate,
+    pool_gpd,
 )
 from tideglass.marea.harmonics_db import (
     add_harmonic_file,
@@ -77,7 +79,13 @@ from tideglass.marea.kalman import JointModel
 from tideglass.marea.kernel import available_backends, basis_matrix
 from tideglass.marea.krige import KrigeField, krige_field, krige_regional
 from tideglass.marea.ledger import DecisionLedger
-from tideglass.marea.met import MetResponse, SurgeForecast, learn_met_response
+from tideglass.marea.met import (
+    DischargeCoupling,
+    MetResponse,
+    SurgeForecast,
+    learn_discharge_coupling,
+    learn_met_response,
+)
 from tideglass.marea.model import Prediction, TideModel
 from tideglass.marea.nowcast import NowcastEngine, UpdateLog
 from tideglass.marea.ops import OpsReport, cold_start, poll, rerun
@@ -116,6 +124,7 @@ __all__ = [
     "CostLoss",
     "DecisionCurve",
     "DecisionLedger",
+    "DischargeCoupling",
     "FederatedRefit",
     "FederatedReport",
     "GaugeStore",
@@ -141,6 +150,7 @@ __all__ = [
     "SkewSurge",
     "StationWatch",
     "SurgeForecast",
+    "SurgeResponse",
     "TideAdvisor",
     "TideModel",
     "TransferCoefficients",
@@ -176,6 +186,7 @@ __all__ = [
     "joint_exceedance_probability",
     "krige_field",
     "krige_regional",
+    "learn_discharge_coupling",
     "learn_met_response",
     "learn_regime_calibration",
     "learn_residual",
@@ -190,6 +201,7 @@ __all__ = [
     "pit_histogram",
     "pit_values",
     "poll",
+    "pool_gpd",
     "principal",
     "qc_check",
     "read_harmonic_grid",
