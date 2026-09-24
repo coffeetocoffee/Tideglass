@@ -138,7 +138,7 @@ def _write_tpxo_nc(path, lons, lats, consts, mask=None, int16_phase=(),
 
 
 def _fixture(path, **kw):
-    amps = {c: v[0] for c, v in FIX_CONSTS.items()}
+    {c: v[0] for c, v in FIX_CONSTS.items()}
     _write_tpxo_nc(path, FIX_LONS, FIX_LATS,
                     {c: (np.full((3, 3), a), np.full((3, 3), p))
                      for c, (a, p) in FIX_CONSTS.items()}, **kw)
@@ -317,7 +317,7 @@ def _gauge_csv(path, days=40, seed=21):
     y = y + np.random.default_rng(seed).normal(0.0, 0.02, size=t.size)
     with open(path, "w") as fh:
         fh.write("time,height\n")
-        fh.writelines("%s,%.4f\n" % (ti.isoformat(), hi) for ti, hi in zip(times, y))
+        fh.writelines(f"{ti.isoformat()},{hi:.4f}\n" for ti, hi in zip(times, y))
     return str(path)
 
 

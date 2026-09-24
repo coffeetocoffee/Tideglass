@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 
 from tideglass.marea.crowdsource import GaugeStore, read_csv
-from tideglass.marea.spatial import harmonize
 
 
 def _make_csv(path: str, seed: int, n: int = 240) -> None:
@@ -21,8 +20,7 @@ def _make_csv(path: str, seed: int, n: int = 240) -> None:
     heights = base + 0.15 * rng.standard_normal(n)
     with open(path, "w") as fh:
         fh.write("time,height\n")
-        for t, h in zip(times, heights):
-            fh.write(f"{t.isoformat()},{h:.4f}\n")
+        fh.writelines(f"{t.isoformat()},{h:.4f}\n" for t, h in zip(times, heights))
 
 
 def test_read_csv_skips_header():

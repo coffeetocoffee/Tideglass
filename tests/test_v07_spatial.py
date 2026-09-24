@@ -1,27 +1,20 @@
 """Tests for v0.7 — kriging spatial harmonics, response transfer, global bench."""
 
 import csv
-import json
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
 
-from tideglass import TideModel  # top-level exports (v0.7)
 from tideglass import (
     ResponseTransfer,
+    TideModel,  # top-level exports (v0.7)
     krige_field,
     krige_regional,
 )
 from tideglass.cli import main as cli_main
+from tideglass.marea import constituents as C
 from tideglass.marea import spatial as SP
-from tideglass.marea import constituents as C
-from tideglass.marea.bench_global import (
-    compare,
-    global_model_at,
-    read_harmonic_grid,
-)
-from tideglass.marea import constituents as C
 from tideglass.marea.bench_global import (
     compare,
     global_model_at,
@@ -105,7 +98,7 @@ def test_regional_field_krige_default_carries_variance():
 
 
 def test_regional_field_idw_still_available_and_matches_legacy():
-    rng = np.random.default_rng(6)
+    np.random.default_rng(6)
     t = np.arange(10 * 24, dtype=float)
     shared = np.cos(0.5059 * t - 0.4)
     series = {"A": shared, "B": 0.6 * shared + 0.2, "C": 1.3 * shared - 0.1}

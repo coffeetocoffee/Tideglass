@@ -4,6 +4,7 @@ turning the AR(1) nowcast into a 48-hour forecast that feeds decision pricing.""
 from __future__ import annotations
 
 import io
+import itertools
 import math
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError
@@ -25,7 +26,7 @@ from tideglass.marea.met import (
     write_met_csv,
 )
 from tideglass.marea.model import Prediction
-from tideglass.marea.surge import AR1, fit_ar1
+from tideglass.marea.surge import fit_ar1
 
 UTC = timezone.utc
 T0 = datetime(2023, 1, 1, tzinfo=UTC)
@@ -92,7 +93,7 @@ def learned():
 # -- learning the response ------------------------------------------------------
 
 def test_recovers_response_and_lag(learned):
-    times, ws, wd, pr, surge, resp, diag = learned
+    _times, _ws, _wd, _pr, _surge, resp, diag = learned
     assert diag["lag"] == TRUE["lag"]
     assert resp.intercept == pytest.approx(TRUE["c0"], abs=2e-3)
     assert resp.stress_u == pytest.approx(TRUE["su"], rel=0.05)
@@ -128,7 +129,7 @@ def test_survives_a_lag_free_record():
     ws, wd, pr = _met(n, seed=5)
     su, sv = stress_features(ws, wd)
     surge = 0.01 + 0.004 * su + 0.002 * sv  # concurrent, no lag
-    resp, diag = learn_met_response(times, surge, times, ws, wd, pr,
+    _resp, diag = learn_met_response(times, surge, times, ws, wd, pr,
                                     max_lag_hours=4)
     assert diag["lag"] == 0
     assert diag["r2"] > 0.9
@@ -162,7 +163,7 @@ def test_learn_validations():
 # -- forecast --------------------------------------------------------------------
 
 def test_forecast_mean_does_not_decay(learned):
-    times, ws, wd, pr, surge, resp, diag = learned
+    times, _ws, _wd, _pr, _surge, resp, _diag = learned
     # sustained storm forcing keeps the forecast mean up at every lead — the
     # v1.1-era AR(1) tracker would have decayed it to ~0 within a day
     storm_ws = np.full(48, 18.0)
@@ -178,7 +179,7 @@ def test_forecast_mean_does_not_decay(learned):
 
 
 def test_forecast_layers_ar1_memory(learned):
-    times, ws, wd, pr, surge, resp, diag = learned
+    times, ws, wd, pr, surge, resp, _diag = learned
     resid = surge - resp.surge(times, ws, wd, pr)
     ar = fit_ar1(resid)
     ftimes = _hourly(24, start=times[-1] + timedelta(hours=1))
@@ -219,7 +220,7 @@ def test_hand_built_response_forecast():
 
 
 def test_response_roundtrip(learned):
-    times, ws, wd, pr, surge, resp, diag = learned
+    times, ws, wd, pr, _surge, resp, _diag = learned
     r2 = MetResponse.from_dict(resp.to_dict())
     assert r2.lag_hours == resp.lag_hours
     assert np.allclose(r2.surge(times, ws, wd, pr), resp.surge(times, ws, wd, pr))
@@ -233,7 +234,7 @@ def test_met_csv_roundtrip(tmp_path):
     ws, wd, pr = _met(n, seed=9)
     path = tmp_path / "met.csv"
     write_met_csv(list(zip(times, ws, wd, pr)), str(path))
-    t2, ws2, wd2, pr2 = read_met_csv(str(path))
+    t2, ws2, _wd2, pr2 = read_met_csv(str(path))
     assert len(t2) == n
     assert np.allclose(ws2, np.round(ws, 2), atol=0.02)
     assert np.allclose(pr2, np.round(pr, 2), atol=0.02)
@@ -242,9 +243,8 @@ def test_met_csv_roundtrip(tmp_path):
     with open(p2, "w") as fh:
         fh.write("time,wind_speed,wind_dir,pressure\n")
         fh.write("not-a-time,1,2,3\n")  # unparsable row
-        for t, s, d, pp in zip(times, ws, wd, pr):
-            fh.write(f"{t.isoformat()},{s:.4f},{d:.2f},{pp:.2f}\n")
-    t3, ws3, wd3, pr3 = read_met_csv(str(p2))
+        fh.writelines(f"{t.isoformat()},{s:.4f},{d:.2f},{pp:.2f}\n" for t, s, d, pp in zip(times, ws, wd, pr))
+    t3, ws3, _wd3, _pr3 = read_met_csv(str(p2))
     assert len(t3) == n
     assert np.allclose(ws3, ws, atol=1e-2)
 
@@ -277,7 +277,7 @@ def test_flood_probability_accepts_per_time_surge():
 
 
 def test_decision_curve_prices_surge_forecast(learned):
-    times, ws, wd, pr, surge, resp, diag = learned
+    times, _ws, _wd, _pr, _surge, _resp, _diag = learned
     ftimes = _hourly(24, start=times[-1] + timedelta(hours=1))
     mean = np.full(24, 1.0)
     pred = Prediction(mean=mean, lower=mean - 0.1, upper=mean + 0.1,
@@ -357,7 +357,7 @@ def test_fetch_met_merges_products_and_guards_range():
     rows = fetch_met("9414290", "2024-01-01", "2024-01-01", _getter=getter)
     # the 01:00 row has no wind (blank) -> merged out; 2 rows survive
     assert len(rows) == 2
-    t0, s0, d0, p0 = rows[0]
+    _t0, s0, d0, p0 = rows[0]
     assert s0 == pytest.approx(8.5) and d0 == pytest.approx(225)
     assert p0 == pytest.approx(1002.3)
     assert len(calls) == 2  # wind + air_pressure
@@ -368,7 +368,7 @@ def test_fetch_met_merges_products_and_guards_range():
 
     long_rows = fetch_met_range("9414290", "2024-01-01", "2024-02-15",
                                 _getter=getter)
-    assert all(r[0] < s[0] for r, s in zip(long_rows, long_rows[1:]))
+    assert all(r[0] < s[0] for r, s in itertools.pairwise(long_rows))
 
 
 def test_fetch_met_http_error_surfaces_noaa_message():
@@ -410,8 +410,7 @@ def test_cli_surge_end_to_end(tmp_path, capsys):
     obs_csv = tmp_path / "obs.csv"
     with open(obs_csv, "w") as fh:
         fh.write("time,height\n")
-        for t, o in zip(times, obs):
-            fh.write(f"{t.isoformat()},{o:.4f}\n")
+        fh.writelines(f"{t.isoformat()},{o:.4f}\n" for t, o in zip(times, obs))
     met_csv = tmp_path / "met.csv"
     write_met_csv(list(zip(times, ws, wd, pr)), str(met_csv))
 
@@ -470,8 +469,7 @@ def test_cli_surge_requires_matching_cost_loss(tmp_path, capsys):
     obs_csv = tmp_path / "obs.csv"
     with open(obs_csv, "w") as fh:
         fh.write("time,height\n")
-        for t, o in zip(times, obs):
-            fh.write(f"{t.isoformat()},{o:.4f}\n")
+        fh.writelines(f"{t.isoformat()},{o:.4f}\n" for t, o in zip(times, obs))
     met_csv = tmp_path / "met.csv"
     write_met_csv(list(zip(times, ws, wd, pr)), str(met_csv))
     rc = main(["surge", str(obs_csv), str(met_csv), "--station", "sg2",

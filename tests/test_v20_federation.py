@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
-from tideglass import TideModel
 from tideglass.marea import constituents as CON
 from tideglass.marea import federation
 
@@ -86,7 +85,7 @@ def test_peer_bundle_anonymized_roundtrip(tmp_path):
     bundle.save(str(path))
     back = federation.PeerBundle.load(str(path))
     assert set(back.stations) == set(bundle.stations)
-    c = back.stations[list(back.stations)[0]]
+    c = back.stations[next(iter(back.stations))]
     assert len(c.constituents) >= 2
     assert len(c.coef) == 1 + 2 * len(c.constituents)
     assert len(c.covariance) == 1 + 2 * len(c.constituents)

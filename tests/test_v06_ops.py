@@ -6,8 +6,11 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from tideglass import TideModel  # top-level exports (v0.6)
-from tideglass import HealthMonitor, NowcastEngine
+from tideglass import (
+    HealthMonitor,
+    NowcastEngine,
+    TideModel,  # top-level exports (v0.6)
+)
 from tideglass.cli import main as cli_main
 from tideglass.marea import constituents as C
 from tideglass.marea import ops as OPS

@@ -7,7 +7,6 @@ import math
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
-import pytest
 
 from tideglass import TideModel
 from tideglass.marea import constituents as CON
@@ -98,7 +97,7 @@ def test_qc_clean_interpolates():
     h[100] += 5.0
     h[150] += 5.0
     rep = qc.qc_check(times, h)
-    t2, h2 = qc.clean_series(times, h, rep)
+    _t2, h2 = qc.clean_series(times, h, rep)
     assert len(h2) == len(h)
     # spiked values are replaced by interpolation (no longer 5 m away)
     assert abs(h2[100] - h[100]) > 1.0

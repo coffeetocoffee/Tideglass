@@ -41,8 +41,7 @@ def _hourly(start, n):
 def _write_csv(path, times, heights):
     with open(path, "w", newline="") as fh:
         fh.write("time,height\n")
-        for t, h in zip(times, heights):
-            fh.write(f"{t.isoformat()},{h:.6f}\n")
+        fh.writelines(f"{t.isoformat()},{h:.6f}\n" for t, h in zip(times, heights))
 
 
 def _consts(ph=0.0):

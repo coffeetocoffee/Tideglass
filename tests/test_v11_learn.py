@@ -60,8 +60,8 @@ def seasonal():
 
 
 def test_learn_seasonal_bias(seasonal):
-    times, truth, h, model = seasonal
-    rm, diag = learn_residual(model, times, h, bins=12)
+    times, _truth, h, model = seasonal
+    _rm, diag = learn_residual(model, times, h, bins=12)
     # the learned table recovers the annual bias the principal-8 cannot fit
     assert 0.10 < diag["max_abs_bias"] < 0.20
     assert diag["rmse_after"] < 0.4 * diag["rmse_before"]
@@ -70,7 +70,7 @@ def test_learn_seasonal_bias(seasonal):
 def test_attach_changes_predict(seasonal):
     times, truth, h, model = seasonal
     bias = _seasonal_bias(times)
-    rm, diag = learn_residual(model, times, h, bins=12)
+    rm, _diag = learn_residual(model, times, h, bins=12)
     raw = model.predict(times)
     model.attach_residual(rm)
     assert model.residual is rm
@@ -86,15 +86,15 @@ def test_attach_changes_predict(seasonal):
 
 
 def test_conformal_band(seasonal):
-    times, truth, h, model = seasonal
-    rm, diag = learn_residual(model, times, h, bins=12)
+    times, _truth, h, model = seasonal
+    _rm, diag = learn_residual(model, times, h, bins=12)
     assert diag["conformal_q"] is not None
     assert 0.5 < diag["conformal_q"] < 3.0
     assert diag["coverage_after"] >= 0.90
 
 
 def test_residual_roundtrip(seasonal):
-    times, truth, h, model = seasonal
+    times, _truth, h, model = seasonal
     rm, _ = learn_residual(model, times, h, bins=12)
     model.attach_residual(rm)
     restored = TideModel.load_harmonic(
@@ -159,7 +159,7 @@ def test_pool_trust_downweights_neighbour():
     distrusted = HierarchicalPool({"a": ma, "b": mb},
                                   trust={"a": 1.0, "b": 0.01}).pool("a")
     amp = lambda m: {f.name: f.amplitude
-                     for f in m.constituents()}["M2"]  # noqa: E731
+                     for f in m.constituents()}["M2"]
     # with b trusted, a's M2 is pulled toward b's 2.0; with b distrusted it
     # stays at a's own 1.0
     assert amp(distrusted) < amp(trusted)
@@ -193,8 +193,7 @@ def test_cli_correct(tmp_path, capsys):
     csv = tmp_path / "rec.csv"
     with open(csv, "w") as fh:
         fh.write("time,height\n")
-        for t, hh in zip(times, h):
-            fh.write(f"{t.isoformat()},{hh:.4f}\n")
+        fh.writelines(f"{t.isoformat()},{hh:.4f}\n" for t, hh in zip(times, h))
     assert main(["fit", str(csv), "--station", "c1", "--store",
                  str(tmp_path)]) == 0
     capsys.readouterr()

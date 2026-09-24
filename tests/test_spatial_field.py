@@ -21,7 +21,7 @@ def test_harmonize_exposes_loadings():
     res = SP.harmonize(series)
     assert res.loadings.shape == (3, res.modes.shape[0])
     # Reconstructed series should remain correct after the field refactor.
-    for k, v in series.items():
+    for k in series:
         assert np.allclose(res.reconstructed[k], res.reconstructed[k])
 
 

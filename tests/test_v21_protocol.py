@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
-from tideglass import TideModel
 from tideglass.marea import constituents as CON
 from tideglass.marea import federation
 
@@ -207,7 +206,7 @@ def test_lineage_survives_federation(tmp_path):
         assert m.meta["lineage"]["data_sha256"] == c0.lineage["data_sha256"]
 
     # a refit history extends the chain: old hash, then the current one
-    m = list(originals.values())[0]
+    m = next(iter(originals.values()))
     m.meta["refit_history"] = [{"data_sha256": "ab" * 32}]
     c2 = federation._contribution_from_model(m, "x")
     assert c2.lineage["chain"] == ["ab" * 32, m.meta["data_sha256"]]
@@ -337,7 +336,7 @@ def test_dp_noisify(tmp_path):
     # gentle noise keeps predictions close to the original
     mild = federation.dp_noisify(bundle, 50.0, clip_m=2.0, seed=7)
     ts = _hourly(T0, 48)
-    c0 = list(bundle.stations.values())[0]
+    c0 = next(iter(bundle.stations.values()))
     m0 = federation._model_from_contribution(c0, "orig")
     m1 = federation._model_from_contribution(
         mild.stations[c0.alias], "mild")
@@ -448,7 +447,7 @@ def test_cli_peers_trust(tmp_path, capsys):
     assert rc == 0
     capsys.readouterr()
 
-    local = _local_obs(tmp_path, [("local1", 10.0), ("local2", 10.0)])
+    _local_obs(tmp_path, [("local1", 10.0), ("local2", 10.0)])
     l1, l2 = str(tmp_path / "local1.csv"), str(tmp_path / "local2.csv")
     rc = main(["peers", "--store", str(dest), "--obs", l1, l2])
     out_text = capsys.readouterr().out
