@@ -355,3 +355,188 @@ class StringIOWrapper:
     def __next__(self) -> str:
         return next(self._lines)
 
+
+# -----------------------------------------------------------------------------
+# Batch downloads and quality filtering
+# -----------------------------------------------------------------------------
+
+
+def _short_bbox_hash(lon_min: float, lon_max: float, lat_min: float, lat_max: float) -> str:
+    """Short human-readable ID for a bounding box."""
+    key = f"{lon_min},{lon_max},{lat_min},{lat_max}"
+    short = hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+    return f"{lon_min:.1f}_{lon_max:.1f}_{lat_min:.1f}_{lat_max:.1f}_{short}"
+
+
+def fetch_emodnet_batch(
+    queries: list[dict[str, Any]],
+    dataset: str = "sl",
+    out_dir: str | None = None,
+) -> dict[str, list[tuple[datetime, float]]]:
+    """Download EMODnet data for multiple regions concurrently.
+
+    :param queries: list of query dicts with keys ``bbox``, ``start``, ``end``.
+        Example::
+
+            queries = [
+                {"bbox": (-10.0, 5.0, 35.0, 60.0), "start": "2024-02-01"},
+                {"bbox": (10.0, 25.0, 45.0, 55.0)},  # default to last 31 days
+            ]
+
+    :param dataset: "sl" for sea level (default) or "st" for storm surge residuals.
+    :param out_dir: optional cache directory; each region writes to
+        ``out_dir/<region_id>.csv`` where ``region_id`` is the SHA-256 prefix of its bbox.
+
+    Returns a dictionary mapping region IDs to their respective row lists.
+    Raises ``EMODNetError`` if any region fails.
+
+    Example::
+
+        from tideglass.fetch_emodnet import fetch_emodnet_batch
+
+        queries = [
+            {"bbox": (-10.0, 5.0, 35.0, 60.0)},   # Iberia/UK
+            {"bbox": (10.0, 25.0, 40.0, 50.0)},   # Western Europe
+            {"bbox": (15.0, 30.0, 35.0, 50.0)},   # Mediterranean
+        ]
+
+        results = fetch_emodnet_batch(queries, out_dir="cache")
+        for rid, rows in results.items():
+            print(f"{rid}: {len(rows)} rows downloaded")
+    """
+    import concurrent.futures
+
+    def one_region(q: dict[str, Any]) -> tuple[str, list[tuple[datetime, float]]]:
+        lon_min, lon_max, lat_min, lat_max = q["bbox"]
+        region_id = _short_bbox_hash(lon_min, lon_max, lat_min, lat_max)
+        try:
+            rows = fetch_emodnet(
+                lon_min=lon_min, lon_max=lon_max,
+                lat_min=lat_min, lat_max=lat_max,
+                start=q.get("start"), end=q.get("end"),
+                dataset=dataset,
+                out_dir=out_dir,
+            )
+            return region_id, rows
+        except Exception as exc:
+            raise EMODNetError(f"region {region_id} failed: {exc}") from exc
+
+    results: dict[str, list[tuple[datetime, float]]] = {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(one_region, q) for q in queries]
+        for future in concurrent.futures.as_completed(futures):
+            rid, rows = future.result()
+            results[rid] = rows
+
+    return results
+
+
+def fetch_emodnet_with_quality(
+    lon_min: float,
+    lon_max: float,
+    lat_min: float,
+    lat_max: float,
+    start: str | datetime | None = None,
+    end: str | datetime | None = None,
+    dataset: str = "sl",
+    min_quality: str = "validated",
+    out_dir: str | None = None,
+) -> list[tuple[datetime, float]]:
+    """Fetch EMODnet data filtered by quality flags.
+
+    :param lon_min/max, lat_min/max: bounding box coordinates.
+    :param start/end: date range (ISO-8601 or YYYY-MM-DD).
+    :param dataset: "sl" (sea level) or "st" (storm surge).
+    :param min_quality: filter threshold. Accepts ``raw``, ``processed``, ``validated``.
+        Only returns rows with quality >= threshold. Defaults to ``validated`` (highest).
+    :param out_dir: cache directory for raw downloads before filtering.
+
+    Returns only rows whose quality flag passes the threshold. The quality field is
+    expected in the CSV header column named ``quality`` or similar; missing columns are
+    skipped without error.
+
+    Quality thresholds (ascending order):
+        * raw: unverified observations
+        * processed: cleaned but not fully validated
+        * validated: thoroughly checked by provider staff
+
+    Example::
+
+        rows = fetch_emodnet_with_quality(
+            lon_min=-10.0, lon_max=5.0, lat_min=35.0, lat_max=60.0,
+            start="2024-02-01", min_quality="validated",
+        )
+    """
+    reader = csv.reader(StringIOWrapper(""))
+
+    url = _emodnet_download_url(lon_min, lon_max, lat_min, lat_max, start, end, dataset)
+
+    if out_dir is None:
+        out_dir = ".tideglass/emodnet_cache"
+    os.makedirs(out_dir, exist_ok=True)
+    fname = _download_filename(url)
+    cache_path = os.path.join(out_dir, fname)
+
+    # Load cached if exists
+    if os.path.exists(cache_path):
+        text = open(cache_path, "r", encoding="utf-8").read()
+    else:
+        req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                if resp.status != 200:
+                    raise EMODNetError(f"Download failed: status={resp.status}")
+                text = resp.read().decode("utf-8")
+        except Exception as exc:
+            raise EMODNetError(f"Network error: {exc}") from exc
+        with open(cache_path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    # Parse and filter by quality
+    reader_obj = csv.reader(StringIOWrapper(text))
+    header_row = next(reader_obj, None)
+    if not header_row:
+        return []
+
+    norm = [h.strip().lower() for h in header_row]
+    idx_time = next((i for i, c in enumerate(norm) if "time" in c), -1)
+    idx_value = next((i for i, c in enumerate(norm) if "value" in c or "level" in c), -1)
+    idx_qual = next((i for i, c in enumerate(norm) if "quality" in c), -1)
+
+    valid_cols = idx_time >= 0 and idx_value >= 0
+    if not valid_cols:
+        raise EMODNetError("CSV missing required 'time'/'value' columns")
+
+    qual_order = {"raw": 0, "processed": 1, "validated": 2}
+    threshold = qual_order.get(min_quality.lower(), 1)
+
+    rows: list[tuple[datetime, float]] = []
+    for row in reader_obj:
+        if len(row) <= max(idx_time, idx_value):
+            continue
+        ts_str, val_str = row[idx_time].strip(), row[idx_value].strip()
+        if not ts_str or not val_str:
+            continue
+
+        # Apply quality filter if present
+        if idx_qual >= 0 and idx_qual < len(row):
+            qual = row[idx_qual].strip().lower()
+            if qual not in qual_order or qual_order[qual] < threshold:
+                continue
+
+        try:
+            t = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+
+        try:
+            h = float(val_str)
+        except ValueError:
+            continue
+
+        rows.append((t, h))
+
+    return sorted(rows, key=lambda x: x[0])

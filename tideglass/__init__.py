@@ -11,6 +11,8 @@ from tideglass.fetch_emodnet import (
     EMODNetStationNotFoundError,
     emodnet_stations,
     fetch_emodnet,
+    fetch_emodnet_batch,
+    fetch_emodnet_with_quality,
 )
 
 __version__ = "3.3.0"
