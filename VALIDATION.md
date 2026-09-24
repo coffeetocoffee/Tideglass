@@ -34,8 +34,18 @@ For each public NOAA gauge we:
 4. Score `predict(test)` with `rmse`, `peak_tide_error` (error at observed
    high/low waters — the metric that matters for navigation/flooding), and
    `ci_coverage` (fraction of observations inside the 95% band).
-5. Run the same split through `pytides.decompose` for an apples-to-apples
-   comparison. `pytides` has no uncertainty, so its coverage is `n/a`.
+5. Run the same split through `pytides.decompose` for a like-for-like
+   *protocol* comparison. `pytides` has no uncertainty, so its coverage is
+   `n/a`.
+
+> **What this comparison does and does not show.** The protocol is identical
+> (same data, same chronological split, same metrics), but the two engines are
+> **not solving the same harmonic basis**: Marea auto-selects constituents via
+> DCDM while `pytides` runs its own inference and does not expose which
+> constituents it chose. The bench command therefore prints Marea's constituent
+> count and states explicitly that the bases are unmatched. Treat the numbers
+> below as a result for these records, not as a controlled measurement of
+> solver quality alone, and not as a general claim about either package.
 
 `UTide` (Matlab/Python, Codiga et al. 2011) is the other reference-grade
 harmonic analyzer. Its accuracy is comparable to a *well-solved* least-squares
@@ -60,10 +70,14 @@ Summer 2024, calmer spell (684 train / 228 test):
 | marea   | **0.0869** | **0.0618**  | 0.7588   |
 | pytides | 0.2606  | 0.1592      | n/a      |
 
-Marea Core is the **RMSE winner in both seasons** — roughly 6× tighter in
-winter, 3× in summer. `pytides`' nonlinear solve lands in a poor local minimum
-on this complex (mixed semi-diurnal) port, which is exactly the failure mode
-the exact solver was designed to eliminate.
+Marea Core is the **RMSE winner on both of these records** — roughly 6× tighter
+in winter, 3× in summer. The likely cause is not the solver: it is that
+`pytides`' inference lands in a poor local minimum on this mixed
+semi-diurnal port, while Marea's DCDM selection plus exact solve recovers the
+dominant constituents. Attributing the whole gap to the "exact solver" (as an
+earlier draft of this document did) overstates what a one-station,
+unmatched-basis comparison can establish. Reproduce with `tideglass bench`; the
+command states the unmatched-basis caveat alongside the numbers.
 
 Coverage dips below the nominal 0.95 in summer because genuine non-tidal
 variance (upwelling, storm setup) exceeds the training residual; that signal is

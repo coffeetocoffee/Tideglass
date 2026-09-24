@@ -51,6 +51,23 @@ class Advice:
     decision: DC.DecisionCurve | None = None  # priced act/wait policy
 
 
+def _mean_prediction_sigma(pred: Prediction) -> float | None:
+    """Mean half-band width of a prediction, or ``None`` when bands are absent.
+
+    A model loaded from published harmonic constants has no covariance, so its
+    band collapses to zero width. Passing that on as a noise scale would tell
+    the risk scorer the curve is exact, so ``None`` is returned instead and the
+    score stays un-widened.
+    """
+    if not getattr(pred, "bands_available", True):
+        return None
+    half = (np.asarray(pred.upper, dtype=float)
+            - np.asarray(pred.lower, dtype=float)) / 2.0
+    if half.size == 0 or not np.all(np.isfinite(half)):
+        return None
+    return float(np.mean(half) / 1.96)
+
+
 class TideAdvisor:
     """Advise on harvesting, rip risk, and species for a fitted model."""
 
@@ -94,6 +111,7 @@ class TideAdvisor:
             wave_weight=rip_cfg["wave_weight"],
             ref_wave_height=rip_cfg["ref_wave_height_m"],
             wave_height_m=wave_height_m, wave_period_s=wave_period_s,
+            sigma_m=_mean_prediction_sigma(pred),
         )
         hv_cfg = self.rules["harvest"]
         harvest = HV.safe_windows(
@@ -141,6 +159,12 @@ class TideAdvisor:
                          f"{float(np.max(flood)):.1%}")
         if decision is not None:
             lines.append(f"  {decision}")
+        if rip.missing_inputs:
+            lines.append(
+                f"  rip risk confidence: {rip.confidence} "
+                f"(missing: {', '.join(rip.missing_inputs)})"
+            )
+        lines.append(f"  note: {rip.basis}")
         return Advice(
             station=self.model.station, region=self.region, times=times, prediction=pred,
             rip=rip, harvest=harvest, exposure=exposure,

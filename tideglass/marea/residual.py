@@ -91,7 +91,13 @@ class ResidualModel:
         else:
             lo = lo + corr
             hi = hi + corr
-        return Prediction(mean=mean, lower=lo, upper=hi, se=se)
+        return Prediction(
+            mean=mean,
+            lower=lo,
+            upper=hi,
+            se=se,
+            bands_available=prediction.bands_available,
+        )
 
     def to_dict(self) -> dict:
         return {

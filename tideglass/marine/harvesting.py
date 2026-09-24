@@ -3,6 +3,12 @@
 Safe hand-collection needs a workable low-water exposure window AND a
 clean surge guard: no flagged residual/surge event in the preceding
 ``surge_guard_hours`` (runoff and resuspension risk).
+
+This is an **exposure-timing screen, not a sanitation clearance**. A window
+means the bed is uncovered for long enough to work and no surge was flagged
+recently; it says nothing about microbiological water quality, biotoxins,
+or local closures. Each returned :class:`HarvestWindow` carries that caveat in
+its ``caution`` field.
 """
 
 from __future__ import annotations
@@ -14,12 +20,18 @@ from datetime import datetime, timedelta
 from tideglass.marine.knowledge import HARVEST_DEFAULTS
 from tideglass.marine.species import exposure_windows
 
+HARVEST_CAUTION = (
+    "exposure timing only; not a sanitation or biotoxin clearance, not a "
+    "harvest licence, and not a substitute for local closures and advisories"
+)
+
 
 @dataclass(frozen=True)
 class HarvestWindow:
     start: datetime
     end: datetime
     reason: str
+    caution: str = HARVEST_CAUTION
 
 
 def safe_windows(

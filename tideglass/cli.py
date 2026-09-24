@@ -43,6 +43,7 @@ renders the one-page global validation report.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
 import os
@@ -357,13 +358,20 @@ def cmd_calibrate(args) -> int:
     return 0
 
 
-def _load_pytides():
-    """Import pytides with minimal Py2-era compat shims.
+@contextlib.contextmanager
+def _pytides_env():
+    """Yield pytides' ``tide`` module with Py2-era compat shims installed.
 
-    The canonical package (0.0.4) is unmaintained: it uses ``collections.Iterable``,
-    ``functools.reduce``-as-builtin, ``numpy.float`` and top-level intra-package
-    imports. We shim those at runtime purely to run the head-to-head benchmark.
-    Raises ImportError/RuntimeError with a clear message when unavailable.
+    The canonical package (0.0.4) is unmaintained: it uses
+    ``collections.Iterable``, ``reduce`` as a builtin, ``numpy.float`` and
+    top-level intra-package imports. Those names are resolved **lazily, at call
+    time** rather than at import, so the shims must stay installed for the whole
+    benchmark and not merely while importing.
+
+    Every mutation is rolled back on exit. Leaking a patched ``numpy.float`` or
+    a ``reduce`` injected into ``builtins`` would silently alter behaviour for
+    every other library in the process and mask genuine errors in the caller's
+    own code, so the compatibility surface is kept strictly local.
     """
     import builtins
     import collections
@@ -371,27 +379,52 @@ def _load_pytides():
     import functools
     import importlib.util
 
+    undo: list[tuple[object, str]] = []
     for _name in ("Iterable", "Mapping", "Sequence"):
         if not hasattr(collections, _name):
             setattr(collections, _name, getattr(collections.abc, _name))
+            undo.append((collections, _name))
     if not hasattr(builtins, "reduce"):
         builtins.reduce = functools.reduce
+        undo.append((builtins, "reduce"))
     import numpy as _np
 
     if not hasattr(_np, "float"):
-        _np.float = _np.float64  # noqa: NP001, runtime shim for pytides only
+        _np.float = _np.float64  # noqa: NP001
+        undo.append((_np, "float"))
 
-    spec = importlib.util.find_spec("pytides")
-    if spec is None or not spec.origin:
-        raise ImportError("pytides is not installed (pip install pytides)")
-    pkg_dir = os.path.dirname(spec.origin)
-    if pkg_dir not in sys.path:
-        sys.path.insert(0, pkg_dir)
+    added_path = False
     try:
-        import tide as pytides_tide
-    except Exception as exc:
-        raise RuntimeError(f"could not import pytides: {exc}") from exc
-    return pytides_tide
+        spec = importlib.util.find_spec("pytides")
+        if spec is None or not spec.origin:
+            raise ImportError("pytides is not installed (pip install pytides)")
+        pkg_dir = os.path.dirname(spec.origin)
+        added_path = pkg_dir not in sys.path
+        if added_path:
+            sys.path.insert(0, pkg_dir)
+        try:
+            import tide as pytides_tide
+        except Exception as exc:
+            raise RuntimeError(f"could not import pytides: {exc}") from exc
+        yield pytides_tide
+    finally:
+        for obj, name in undo:
+            with contextlib.suppress(AttributeError):
+                delattr(obj, name)
+        if added_path:
+            with contextlib.suppress(ValueError):
+                sys.path.remove(pkg_dir)
+
+
+def _load_pytides():
+    """Return pytides' ``tide`` module, raising if it is unavailable.
+
+    Convenience probe for callers that only need to know whether pytides is
+    installed. Work performed with the returned module must still run inside
+    :func:`_pytides_env`, because the compat shims are only installed there.
+    """
+    with _pytides_env() as tide_mod:
+        return tide_mod
 
 
 def _fmt(x: float) -> str:
@@ -432,16 +465,18 @@ def cmd_bench(args) -> int:
     rival_row = None
     if args.against == "pytides":
         try:
-            tide_mod = _load_pytides()
-            naive = [t.replace(tzinfo=None) for t in train_t]
-            pt = tide_mod.Tide.decompose(np.asarray(train_y, dtype=float), t=naive)
-            py_mean = np.asarray(
-                pt.at([t.replace(tzinfo=None) for t in test_t]), dtype=float
-            ).ravel()
-            rival_row = {
-                "rmse": rmse(py_mean, test_y),
-                "peak_error": peak_tide_error(py_mean, test_y),
-            }
+            with _pytides_env() as tide_mod:
+                naive = [t.replace(tzinfo=None) for t in train_t]
+                pt = tide_mod.Tide.decompose(
+                    np.asarray(train_y, dtype=float), t=naive
+                )
+                py_mean = np.asarray(
+                    pt.at([t.replace(tzinfo=None) for t in test_t]), dtype=float
+                ).ravel()
+                rival_row = {
+                    "rmse": rmse(py_mean, test_y),
+                    "peak_error": peak_tide_error(py_mean, test_y),
+                }
         except Exception as exc:  # noqa: BLE001 - degrade to Marea-only metrics
             print(f"# pytides comparison skipped: {exc}")
     elif args.against == "tpxo":
@@ -494,10 +529,19 @@ def cmd_bench(args) -> int:
         )
         winner = "marea" if marea["rmse"] <= rival_row["rmse"] else rival_name
         print(f"winner (rmse): {winner}")
+        print(
+            f"basis: marea={len(model.constituents())} constituents; {rival_name} "
+            "infers its own set internally -- harmonic bases are NOT matched, so "
+            "this is not a controlled solver-only comparison"
+        )
         if "ratio" in rival_row:
             print(f"marea/global rmse ratio: {rival_row['ratio']:.3f}")
     else:
         print("winner (rmse): marea (uncontested - baseline unavailable)")
+    print(
+        f"scope: {station}, {len(test_t)} held-out hours on one record -- "
+        "not a multi-station result"
+    )
     return 0
 
 
@@ -2566,7 +2610,12 @@ def _pull_relay_bundles(relay, max_age_days: float) -> tuple[list, int]:
 def cmd_join(args) -> int:
     from tideglass.marea.federation import GlobalFederation, _relay_client
     from tideglass.marea.nowcast import NowcastEngine, save_state
-    from tideglass.marea.ops import _artifact_bundle, _fleet_stations, _paths, _seat_engine
+    from tideglass.marea.ops import (
+        _artifact_bundle,
+        _fleet_stations,
+        _paths,
+        _seat_engine,
+    )
     from tideglass.marea.provenance import provenance
 
     if args.max_age_days < 0.0:
@@ -2605,7 +2654,7 @@ def cmd_join(args) -> int:
         model_path = os.path.join(args.store, f"{station}.json")
         try:
             with open(model_path) as fh:
-                raw = json.load(fh)
+                json.load(fh)
         except (OSError, ValueError):
             continue
         try:

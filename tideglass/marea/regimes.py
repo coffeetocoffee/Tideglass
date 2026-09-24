@@ -92,7 +92,13 @@ class RegimeCalibration:
         se = (np.asarray(prediction.se, dtype=float).ravel()
               if prediction.se is not None and np.asarray(prediction.se).size
               else np.full(mean.size, np.nan))
-        return Prediction(mean=mean, lower=mean - half, upper=mean + half, se=se)
+        return Prediction(
+            mean=mean,
+            lower=mean - half,
+            upper=mean + half,
+            se=se,
+            bands_available=prediction.bands_available,
+        )
 
     # -- persistence -------------------------------------------------------------
 

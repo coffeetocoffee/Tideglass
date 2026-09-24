@@ -1,9 +1,12 @@
 """Curated marine ruleset (CC0-style defaults with cited sources).
 
 These are *illustrative starting points* grounded in standard references —
-tune thresholds to local regulations and conditions. The marine layer never
-touches signal math; it consumes ``MareaCore.predict()`` output plus these
-rules.
+tune thresholds to local regulations and conditions. They are deliberately
+**screening defaults, not calibrated operational thresholds**: they are not
+fitted to any particular beach, and no validation set exists for them. Every
+consumer should treat the resulting output as a prompt to consult local
+authorities, not as clearance to act. The marine layer never touches signal
+math; it consumes ``MareaCore.predict()`` output plus these rules.
 """
 
 SOURCES = [
@@ -13,6 +16,10 @@ SOURCES = [
     "General intertidal ecology — zonation by emersion tolerance",
 ]
 
+CALIBRATION_STATUS = (
+    "screening defaults; uncalibrated, no per-beach validation, not regulatory"
+)
+
 # Harvesting defaults: shellfish hand-collection during low-water exposure.
 HARVEST_DEFAULTS = {
     "low_threshold_m": 0.3,  # exposed enough to walk/work the beds
@@ -21,6 +28,10 @@ HARVEST_DEFAULTS = {
 }
 
 # Rip-current heuristic weights (see rip.py).
+# NOTE: wave_weight defaults to 0.0, so the default score is tide-only. Waves
+# and bathymetry dominate real rip formation, so a tide-only score is screening
+# grade; supply wave_height_m and a non-zero wave_weight (as the regional
+# rulesets do) before treating the output as anything more than a prompt.
 RIP_DEFAULTS = {
     "ref_rate_m_per_h": 0.5,  # rate of change that alone means high risk
     "ref_range_m": 2.0,  # spring-range scale

@@ -5,6 +5,7 @@ import math
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
+import pytest
 
 from tideglass import TideModel  # top-level export (MVP definition of done)
 from tideglass.cli import main as cli_main
@@ -75,13 +76,15 @@ def test_noaa_load_matches_equilibrium_argument():
         "station": "X", "mean": 1.0,
         "constituents": [{"name": "M2", "amplitude": 2.0, "phase": 30.0}],
     })
-    tau, s, h, p, N, p1 = doodson_args(t0)
+    tau, _s, _h, _p, _N, _p1 = doodson_args(t0)
     V = math.radians(2 * tau)  # M2 = 2τ, phase0 = 0
     f, u = nodal_factor(C.get("M2"), t0)
     expected = 1.0 + f * 2.0 * math.cos(V + math.radians(u - 30.0))
     pred = model.predict([t0])
     assert abs(pred.mean[0] - expected) < 1e-9
-    # No covariance on the loaded path: band collapses to the mean.
+    # Published constants ship no covariance: the band collapses to the mean
+    # and says so rather than masquerading as a tight interval.
+    assert not model.bands_available and not pred.bands_available
     assert pred.lower[0] == pred.mean[0] == pred.upper[0]
 
 
@@ -96,6 +99,62 @@ def test_artifact_roundtrip(tmp_path):
     held = _hourly(train[-1] + timedelta(hours=1), 48)
     assert np.max(np.abs(via_str.predict(held).mean - model.predict(held).mean)) < 1e-12
     assert np.max(np.abs(via_file.predict(held).mean - model.predict(held).mean)) < 1e-12
+    # A fit's covariance/sigma2 survive the round-trip, so the calibrated
+    # prediction bands do too (they used to collapse onto the mean).
+    ref = model.predict(held)
+    for restored in (via_str, via_file):
+        assert restored.bands_available
+        got = restored.predict(held)
+        assert got.bands_available
+        assert np.max(np.abs(got.se - ref.se)) < 1e-10
+        assert np.max(np.abs(got.lower - ref.lower)) < 1e-10
+        assert np.max(np.abs(got.upper - ref.upper)) < 1e-10
+        assert (got.upper > got.lower).all()
+
+
+def test_published_constants_report_missing_uncertainty():
+    art = {
+        "station": "X", "mean": 1.0,
+        "constituents": [{"name": "M2", "amplitude": 2.0, "phase": 30.0}],
+    }
+    model = TideModel.load_harmonic(art)
+    assert not model.bands_available
+    with pytest.warns(UserWarning, match="no covariance"):
+        pred = model.predict(_hourly(T0, 4))
+    assert not pred.bands_available
+    assert pred.lower[0] == pred.mean[0] == pred.upper[0]
+    assert "covariance" not in model.to_artifact()
+    assert "sigma2" not in model.to_artifact()
+
+
+def test_residual_sigma_overrides_missing_uncertainty():
+    art = {
+        "station": "X", "mean": 0.0,
+        "constituents": [{"name": "M2", "amplitude": 1.0, "phase": 0.0}],
+    }
+    bare = TideModel.load_harmonic(art)
+    supplied = TideModel.load_harmonic(art, residual_sigma_m=0.10)
+    assert bare._sigma2 == 0.0
+    assert supplied.bands_available
+    times = _hourly(T0, 8)
+    with pytest.warns(UserWarning):
+        bare_pred = bare.predict(times)
+    pred = supplied.predict(times)
+    assert pred.bands_available
+    assert np.max(np.abs(pred.mean - bare_pred.mean)) < 1e-12
+    expected_half = 1.96 * 0.10
+    assert np.allclose(pred.upper - pred.mean, expected_half)
+    assert np.allclose(pred.mean - pred.lower, expected_half)
+
+
+def test_mismatched_covariance_is_rejected():
+    art = {
+        "station": "X", "mean": 0.0,
+        "constituents": [{"name": "M2", "amplitude": 1.0, "phase": 0.0}],
+        "covariance": [[1.0, 0.0], [0.0, 1.0]],  # expects 3x3 for one term
+    }
+    with pytest.raises(ValueError, match="covariance shape"):
+        TideModel.load_harmonic(art)
 
 
 def test_cli_fit_predict_roundtrip(tmp_path, capsys):

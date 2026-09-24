@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -64,6 +65,7 @@ class Prediction:
     lower: np.ndarray
     upper: np.ndarray
     se: np.ndarray  # std error of the mean tide
+    bands_available: bool = True  # False when the model carries no covariance
 
 
 def _hours_since_j2000(times: Sequence[datetime]) -> np.ndarray:
@@ -182,7 +184,12 @@ class TideModel:
         )
 
     @classmethod
-    def load_harmonic(cls, source, station: str | None = None) -> TideModel:
+    def load_harmonic(
+        cls,
+        source,
+        station: str | None = None,
+        residual_sigma_m: float | None = None,
+    ) -> TideModel:
         """Load published harmonic constants (NOAA-style JSON).
 
         Accepts a mapping, a JSON string, or a path to a JSON file::
@@ -190,8 +197,13 @@ class TideModel:
             {"station": "X", "mean": 0.7,
              "constituents": [{"name": "M2", "amplitude": 1.0, "phase": 30.0}]}
 
-        Loaded models carry no covariance, so prediction bands collapse to
-        the mean curve.
+        Loaded models carry no covariance unless the artifact supplies one
+        (a :meth:`fit` round-trips its own ``covariance``/``sigma2``), so
+        published-constant bands collapse to the mean curve. That state is
+        reported explicitly: :attr:`bands_available` is ``False`` and
+        :meth:`predict` warns once rather than silently returning a zero-width
+        interval. Pass ``residual_sigma_m`` to attach an externally supplied
+        noise scale to published constants.
         """
         if isinstance(source, (str, os.PathLike)) and os.path.exists(source):
             with open(source) as fh:
@@ -212,15 +224,34 @@ class TideModel:
             coef[2 + 2 * j] = amp * math.sin(kappa)
             fits.append(Fit(e["name"], amp, float(e["phase"]) % 360.0, 0.0))
         p = coef.size
+        covariance = data.get("covariance")
+        if covariance is None:
+            covariance = np.zeros((p, p))
+        else:
+            covariance = np.asarray(covariance, dtype=float)
+            if covariance.shape != (p, p):
+                raise ValueError(
+                    f"covariance shape {covariance.shape} does not match "
+                    f"{p} coefficients"
+                )
+            if not np.all(np.isfinite(covariance)):
+                raise ValueError("covariance contains non-finite entries")
+        sigma2 = data.get("sigma2")
+        sigma2 = 0.0 if sigma2 is None else float(sigma2)
         restored_meta = dict(data.get("meta", {}))
         restored_meta.setdefault("source", "harmonic")
         if "station" not in restored_meta and data.get("station"):
             restored_meta["station"] = data.get("station")
         model = cls(
-            consts, coef, np.zeros((p, p)), 0.0, fits,
+            consts, coef, covariance, sigma2, fits,
             station=station or data.get("station"), source="harmonic",
             meta=restored_meta or None,
         )
+        if residual_sigma_m is not None and not model.bands_available:
+            # Published constants ship no covariance; let the caller supply the
+            # dominant uncertainty term explicitly instead of silently
+            # returning a zero-width band.
+            model._sigma2 = float(residual_sigma_m) ** 2
         if restored_meta.get("residual_bias") is not None:
             from tideglass.marea.residual import ResidualModel
 
@@ -244,6 +275,18 @@ class TideModel:
         """The attached residual-bias layer, or ``None``."""
         return self._residual
 
+    @property
+    def bands_available(self) -> bool:
+        """Whether this model carries real prediction uncertainty.
+
+        ``False`` for models built from published harmonic constants that ship
+        no covariance: their ``lower``/``upper`` collapse onto ``mean`` and
+        must not be read as a tight-but-valid interval.
+        """
+        if self._sigma2 > 0.0:
+            return True
+        return bool(np.any(self._covariance != 0.0))
+
     def predict(self, times: Sequence[datetime], z: float = _Z95,
                  kernel: str = "numpy") -> Prediction:
         """Predict ``height ±`` band at ``times`` (95% prediction interval).
@@ -251,6 +294,11 @@ class TideModel:
         When a residual-bias layer is attached (:meth:`attach_residual`), the
         learned day-of-year correction is applied to the mean (and the band is
         conformally rescaled) before returning.
+
+        If the model carries no covariance (published constants loaded without
+        a ``residual_sigma_m`` override), ``lower``/``upper`` collapse onto
+        ``mean``, ``bands_available`` is ``False``, and a warning is raised —
+        a zero-width band is not a calibrated interval.
         """
         times = list(times)
         A = _basis_matrix(self._constituents, times, kernel=kernel)
@@ -258,7 +306,22 @@ class TideModel:
         var_mean = np.maximum(np.einsum("ij,jk,ik->i", A, self._covariance, A), 0.0)
         se = np.sqrt(var_mean)
         half = z * np.sqrt(var_mean + self._sigma2)
-        pred = Prediction(mean=mean, lower=mean - half, upper=mean + half, se=se)
+        available = self.bands_available
+        if not available:
+            warnings.warn(
+                "this model has no covariance, so its prediction band collapses "
+                "to the mean curve; pass residual_sigma_m= to load_harmonic() or "
+                "fit the model to obtain calibrated intervals",
+                UserWarning,
+                stacklevel=2,
+            )
+        pred = Prediction(
+            mean=mean,
+            lower=mean - half,
+            upper=mean + half,
+            se=se,
+            bands_available=available,
+        )
         if self._residual is not None:
             pred = self._residual.apply(pred, times)
         return pred
@@ -268,8 +331,14 @@ class TideModel:
         return list(self._fits)
 
     def to_artifact(self) -> dict:
-        """JSON-serializable model artifact (round-trips via load_harmonic)."""
-        return {
+        """JSON-serializable model artifact (round-trips via load_harmonic).
+
+        A fitted model also serializes its ``covariance`` and ``sigma2`` so the
+        round-trip preserves calibrated prediction bands; models without real
+        uncertainty omit both keys, keeping published-constant artifacts in the
+        interoperable NOAA shape.
+        """
+        artifact = {
             "station": self.station,
             "units": "m",
             "mean": float(self._coef[0]),
@@ -281,3 +350,9 @@ class TideModel:
             # the coarse construction tag only when no provenance was pinned.
             "meta": {"source": self.source, **self.meta},
         }
+        if self.bands_available:
+            artifact["covariance"] = [
+                [float(x) for x in row] for row in self._covariance
+            ]
+            artifact["sigma2"] = float(self._sigma2)
+        return artifact

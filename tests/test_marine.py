@@ -36,6 +36,79 @@ def test_exposure_windows_and_fraction():
         SP.exposure_windows(times, h[:-1], 0.0)
 
 
+def test_rip_exposes_decomposition_and_missing_inputs():
+    times, _ = _semidiurnal()
+    _, steep = _semidiurnal(amp=2.0)
+    r = RIP.risk(times, steep)
+    assert r.rate_term.shape == r.score.shape
+    assert r.range_term.shape == r.score.shape
+    assert r.wave_term.shape == r.score.shape
+    total = r.rate_term + r.range_term + r.wave_term
+    assert np.allclose(r.score, np.clip(total, 0, 1))
+    # A tide-only score must name the dominant inputs it is missing.
+    assert "wave_height_m" in r.missing_inputs
+    assert "bathymetry" in r.missing_inputs
+    assert r.confidence == "screening"
+    assert r.usable_for_safety is False
+    assert "not for public-safety decisions" in r.basis
+
+
+def test_rip_wave_informed_confidence():
+    times, _ = _semidiurnal()
+    _, steep = _semidiurnal(amp=2.0)
+    r = RIP.risk(times, steep, wave_weight=0.25, wave_height_m=2.0,
+                 wave_period_s=10.0)
+    assert r.confidence == "wave-informed"
+    assert "wave_height_m" not in r.missing_inputs
+    assert (r.wave_term > 0).all()
+    assert r.score.max() >= RIP.risk(times, steep).score.max()
+
+
+def test_rip_uncertainty_widens_score():
+    times, _ = _semidiurnal()
+    flat = np.zeros(len(times))
+    assert RIP.risk(times, flat).score.max() == 0.0
+    widened = RIP.risk(times, flat, sigma_m=0.10)
+    assert widened.score.max() > 0.0
+    # More height uncertainty can only widen, never narrow, the score.
+    more = RIP.risk(times, flat, sigma_m=0.30)
+    assert more.score.max() >= widened.score.max()
+
+
+def test_advisor_rip_sigma_skips_models_without_bands():
+    from tideglass.marine.advisor import _mean_prediction_sigma
+
+    published = TideModel.load_harmonic({
+        "station": "P", "mean": 0.0,
+        "constituents": [{"name": "M2", "amplitude": 1.0, "phase": 0.0}],
+    })
+    with pytest.warns(UserWarning):
+        pred = published.predict([T0 + timedelta(hours=h) for h in range(4)])
+    assert _mean_prediction_sigma(pred) is None
+
+    train = [T0 + timedelta(hours=h) for h in range(10 * 24)]
+    y = _semidiurnal(days=10)[1] + 0.7 + np.random.default_rng(3).normal(
+        0, 0.02, len(train)
+    )
+    fitted = TideModel.fit(train, y, auto_select=False,
+                           candidates=[C.get("M2")], station="F")
+    sigma = _mean_prediction_sigma(fitted.predict(train[:8]))
+    assert sigma is not None and sigma > 0.0
+
+
+def test_advice_surfaces_screening_caveat():
+    train = [T0 + timedelta(hours=h) for h in range(10 * 24)]
+    y = _semidiurnal(days=10)[1] + 0.7 + np.random.default_rng(4).normal(
+        0, 0.02, len(train)
+    )
+    model = TideModel.fit(train, y, auto_select=False,
+                          candidates=[C.get("M2")], station="Cave")
+    adv = TideAdvisor(model).advise(train[:48])
+    assert "rip risk confidence: screening" in adv.summary
+    assert "not for public-safety decisions" in adv.summary
+    assert all(w.caution for w in adv.harvest)
+
+
 def test_safe_windows_and_surge_guard():
     times, h = _semidiurnal()
     wins = HV.safe_windows(times, h, low_threshold_m=0.0, min_hours=1.0)

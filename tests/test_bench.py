@@ -5,8 +5,9 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
+import sys
 
-from tideglass.cli import _load_pytides, build_parser
+from tideglass.cli import _load_pytides, _pytides_env, build_parser
 from tideglass.cli import main as cli_main
 from tideglass.marea import constituents as C
 from tideglass.marea.solver import rad_per_hour
@@ -27,7 +28,7 @@ def _gauge_csv(path, days=40, seed=21):
     y = y + np.random.default_rng(seed).normal(0.0, 0.02, size=t.size)
     with open(path, "w") as fh:
         fh.write("time,height\n")
-        fh.writelines("%s,%.4f\n" % (ti.isoformat(), hi) for ti, hi in zip(times, y))
+        fh.writelines(f"{ti.isoformat()},{hi:.4f}\n" for ti, hi in zip(times, y))
     return str(path)
 
 
@@ -60,6 +61,48 @@ def test_bench_without_pytides(tmp_path, capsys):
     assert cli_main(["bench", csv, "--against", "none"]) == 0
     out = capsys.readouterr().out
     assert "marea" in out and "uncontested" in out
+
+
+def test_pytides_shims_do_not_leak_into_host_process():
+    """The Py2-era compat shims must be scoped to the benchmark.
+
+    pytides resolves these names lazily, so they have to be installed while it
+    runs -- but leaking a patched numpy.float or a reduce injected into
+    builtins would silently change every other library in the process.
+    """
+    import builtins
+    import collections
+
+    import numpy as np
+
+    before = {
+        "np_float": hasattr(np, "float"),
+        "reduce": hasattr(builtins, "reduce"),
+        "collections_abc": hasattr(collections, "Iterable"),
+        "sys_path_len": len(sys.path),
+    }
+    try:
+        with _pytides_env() as tide_mod:
+            assert hasattr(tide_mod, "Tide")
+            # inside the scope the shims are present
+            assert hasattr(np, "float")
+            assert hasattr(builtins, "reduce")
+            assert hasattr(collections, "Iterable")
+    except Exception as exc:
+        pytest.skip(f"pytides unavailable: {exc}")
+    assert hasattr(np, "float") == before["np_float"]
+    assert hasattr(builtins, "reduce") == before["reduce"]
+    assert hasattr(collections, "Iterable") == before["collections_abc"]
+    assert len(sys.path) == before["sys_path_len"]
+
+
+def test_bench_reports_scope_and_basis_caveat(tmp_path, capsys):
+    csv = _gauge_csv(tmp_path / "gauge.csv")
+    assert cli_main(["bench", csv, "--station", "SYN", "--against", "none",
+                     "--test-fraction", "0.25", "--alpha", "1e-4"]) == 0
+    out = capsys.readouterr().out
+    assert "scope:" in out
+    assert "not a multi-station result" in out
 
 
 def test_help_formats():
