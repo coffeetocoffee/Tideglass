@@ -184,7 +184,7 @@ def poll_emodnet(
             else:
                 print("  status: ok")
 
-        except Exception as exc:
+        except (OSError, ValueError, KeyError) as exc:
             error_info = {"time": datetime.now(timezone.utc).isoformat(), "error": str(exc)}
             stats["errors"].append(error_info)
             print(f"[pass {passes}] Error: {exc}")

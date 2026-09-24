@@ -5,7 +5,7 @@ Marea Core (``tideglass.marea``) is the math engine; the marine layer
 surface adds export feeds, a stdlib HTTP API, and a terminal dashboard.
 """
 
-from tideglass.marea import marea, marine
+from tideglass import marea, marine
 from tideglass.fetch_emodnet import (
     EMODNetError,
     EMODNetStationNotFoundError,
@@ -14,15 +14,18 @@ from tideglass.fetch_emodnet import (
     fetch_emodnet_batch,
     fetch_emodnet_with_quality,
 )
-from tideglass.fetch_emodnet_poll import poll_emodnet
+
+# Module-level EMODnet imports handled below
+
+__version__ = "3.3.0"
+
 from tideglass.fetch_emodnet_auth import (
     EmodnetTokenManager,
     emodnet_login,
     emodnet_logout,
     emodnet_status,
 )
-
-__version__ = "3.3.0"
+from tideglass.fetch_emodnet_poll import poll_emodnet
 from tideglass.marea.bench_global import compare, global_model_at, read_harmonic_grid
 from tideglass.marea.calibration import (
     conformal_quantile,
@@ -155,11 +158,7 @@ __all__ = [
     "DischargeCoupling",
     "EMODNetError",
     "EMODNetStationNotFoundError",
-"EMODNetError",    "EMODNetTokenManager",
-    "emodnet_login",
-    "emodnet_logout",
-    "emodnet_status",
-    "poll_emodnet",
+    "EmodnetTokenManager",
     "FederatedRefit",
     "FederatedReport",
     "GaugeStore",
@@ -216,10 +215,15 @@ __all__ = [
     "decision_curve",
     "decluster",
     "dp_noisify",
+    "emodnet_login",
+    "emodnet_logout",
     "emodnet_stations",
+    "emodnet_status",
     "evaluate_calibration",
     "federate",
     "fetch_emodnet",
+    "fetch_emodnet_batch",
+    "fetch_emodnet_with_quality",
     "find",
     "fit_gpd",
     "flood_probability",
@@ -244,6 +248,7 @@ __all__ = [
     "pit_histogram",
     "pit_values",
     "poll",
+    "poll_emodnet",
     "pool_gpd",
     "principal",
     "qc_check",
