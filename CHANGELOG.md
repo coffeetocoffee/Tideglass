@@ -8,6 +8,17 @@ All notable changes to Tideglass are documented here. The format is based on
 
 ## [3.3.0]
 
+### Added
+- **EMODnet (European) sea-level data fetcher** (`tideglass.fetch_emodnet`).
+  Downloads hourly/daily sea level from ~300 European coastal stations covering
+  Mediterranean, North Sea, Baltic Sea, Atlantic coasts of France/Spain/UK/Ireland/
+  Netherlands/Belgium/Germany, and Arctic Norway/France. CLI command:
+  `tideglass emodnet --bbox lon_min lon_max lat_min lat_max [--start X] [--end Y]`.
+  Caches downloads locally by SHA-256 URL hash for reuse on subsequent runs.
+  Includes station listing: `tideglass emodnet --bbox ... --stations` reports
+  matching gauge IDs before downloading.
+
+
 ### Fixed
 - **Prediction bands survive a fit → save → load round-trip**
   (`marea/model.py`). `to_artifact()` never serialized `covariance`/`sigma2`, so

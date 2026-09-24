@@ -247,7 +247,7 @@ def cmd_smooth(args) -> int:
     print(f"# station={fit.meta.get('station', args.station)} n={fit.observed.size}")
     print(
         f"# secular_trend_mm_yr={fit.trend_mm_yr:+.3f} "
-        f"±{fit.trend_mm_yr_se:.3f}  surge_phi={fit.phi:.3f}  rmse={fit.meta['rmse']:.4f}"
+        f"Â±{fit.trend_mm_yr_se:.3f}  surge_phi={fit.phi:.3f}  rmse={fit.meta['rmse']:.4f}"
     )
     print("# time observed model tide surge trend")
     for t, o, mo, ti, su, tr in zip(
@@ -280,7 +280,7 @@ def cmd_calibrate(args) -> int:
     n_calib = max(24, round(len(times) * args.calib_fraction))
     if len(times) < n_test + n_calib + 72:
         print(
-            f"tideglass calibrate: need ≥ {n_test + n_calib + 72} rows "
+            f"tideglass calibrate: need â‰¥ {n_test + n_calib + 72} rows "
             f"for a train/calib/test split, got {len(times)}",
             file=sys.stderr,
         )
@@ -643,6 +643,60 @@ def cmd_fetch(args) -> int:
     write_csv(rows, out)
     print(f"station: {args.station}  rows: {len(rows)}  datum: {args.datum}")
     print(f"saved: {out}")
+    return 0
+
+
+def cmd_emodnet(args) -> int:
+    from tideglass.fetch_emodnet import emodnet_stations, fetch_emodnet
+
+    lon_min, lon_max, lat_min, lat_max = args.bbox
+    if lon_min >= lon_max or lat_min >= lat_max:
+        print(
+            f"tideglass emodnet: invalid bbox {args.bbox!r} "
+            f"(lon_min < lon_max and lat_min < lat_max required)",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        start = args.start or (datetime.now(timezone.utc) - timedelta(days=31)).strftime("%Y-%m-%d")
+        end = args.end or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    except ValueError as exc:
+        print(f"tideglass emodnet: bad date spec: {exc}", file=sys.stderr)
+        return 2
+
+    if args.stations:
+        # List matching stations
+        stations = emodnet_stations(lon_min, lon_max, lat_min, lat_max)
+        print(f"stations found: {len(stations)} in bbox ({lon_min},{lat_min})–({lon_max},{lat_max})")
+        for s in sorted(stations, key=lambda x: (x["lat"], x["lon"])):
+            print(f"  {s["name"]:<40} {s["lon"]:>+8.3f}°E  {s["lat"]:>+7.2f}°N  ({s["provider"]})")
+        return 0
+
+    # Download data
+    rows: list[tuple[datetime, float]]
+    try:
+        rows = fetch_emodnet(
+            lon_min=lon_min, lon_max=lon_max, lat_min=lat_min, lat_max=lat_max,
+            start=start, end=end, dataset=args.dataset, out_dir=args.out_dir,
+        )
+    except Exception as exc:
+        print(f"tideglass emodnet: failed download: {exc}", file=sys.stderr)
+        return 2
+
+    if not rows:
+        print("tideglass emodnet: no valid rows returned", file=sys.stderr)
+        return 2
+
+    # Output
+    out_path = args.out or "-"
+    with (open(out_path, "w") if out_path != "-" else sys.stdout) as fh:
+        w = _csv.writer(fh)
+        w.writerow(["time", "height"])
+        for t, h in rows:
+            w.writerow([t.isoformat(), f"{h:.4f}"])
+
+    print(f"rows: {len(rows)} | saved: {out_path}")
     return 0
 
 
@@ -1466,7 +1520,7 @@ def cmd_pool(args) -> int:
             print(f"# skipping {fn}: not a harmonic artifact")
     if len(models) < 2:
         print(
-            f"tideglass pool: need ≥ 2 network models in {args.store!r}, "
+            f"tideglass pool: need â‰¥ 2 network models in {args.store!r}, "
             f"found {len(models)}",
             file=sys.stderr,
         )
@@ -1949,6 +2003,26 @@ def build_parser() -> argparse.ArgumentParser:
         "water levels (writes <station>.met.csv)",
     )
     p_fetch.set_defaults(func=cmd_fetch)
+
+
+    # EMODnet European sea-level fetcher
+    p_emodnet = sub.add_parser(
+        "emodnet", help="fetch European (EMODnet) sea level for a bounding box"
+    )
+    p_emodnet.add_argument(
+        "--bbox", nargs=4, type=float, metavar=("lon_min", "lon_max", "lat_min", "lat_max"),
+        required=True, help="bounding box coordinates (degrees): lon_min lon_max lat_min lat_max"
+    )
+    p_emodnet.add_argument("--start", default=None, help="ISO-8601 or YYYY-MM-DD (default: 31d ago)")
+    p_emodnet.add_argument("--end", default=None, help="ISO-8601 or YYYY-MM-DD (default: now)")
+    p_emodnet.add_argument("--dataset", choices=["sl", "st"], default="sl",
+                           help="sea level (sl, default) or storm surge residuals (st)")
+    p_emodnet.add_argument("--out", default=None, help="CSV output path (default: stdout)")
+    p_emodnet.add_argument("--stations", action="store_true",
+                           help="list stations matching bbox instead of downloading data")
+    p_emodnet.add_argument("--out-dir", default=None,
+                           help="local cache directory for downloaded CSVs (auto-caching enabled)")
+    p_emodnet.set_defaults(func=cmd_emodnet)
 
     p_now = sub.add_parser(
         "nowcast",

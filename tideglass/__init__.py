@@ -6,6 +6,12 @@ surface adds export feeds, a stdlib HTTP API, and a terminal dashboard.
 """
 
 from tideglass import marea, marine
+from tideglass.fetch_emodnet import (
+    EMODNetError,
+    EMODNetStationNotFoundError,
+    emodnet_stations,
+    fetch_emodnet,
+)
 
 __version__ = "3.3.0"
 from tideglass.marea.bench_global import compare, global_model_at, read_harmonic_grid
@@ -240,6 +246,10 @@ __all__ = [
     "to_xtide",
     "tpxo_model_at",
     "verify_public_api",
+    "EMODNetStationNotFoundError",
+    "EMODNetError",
+    "emodnet_stations",
+    "fetch_emodnet",
     "write_csv",
     "write_json",
     "write_netcdf",

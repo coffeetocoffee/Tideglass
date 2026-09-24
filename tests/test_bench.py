@@ -26,7 +26,7 @@ def _gauge_csv(path, days=40, seed=21):
         w = float(rad_per_hour(C.speed(C.get(n))))
         y = y + a * np.cos(w * t - p)
     y = y + np.random.default_rng(seed).normal(0.0, 0.02, size=t.size)
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write("time,height\n")
         fh.writelines(f"{ti.isoformat()},{hi:.4f}\n" for ti, hi in zip(times, y))
     return str(path)
