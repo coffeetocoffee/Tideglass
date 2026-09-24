@@ -6,6 +6,54 @@ All notable changes to Tideglass are documented here. The format is based on
 
 ## [Unreleased]
 
+## [3.3.0]
+
+### Fixed
+- **Prediction bands survive a fit → save → load round-trip**
+  (`marea/model.py`). `to_artifact()` never serialized `covariance`/`sigma2`, so
+  reloading a *fitted* model through the public artifact silently collapsed its
+  prediction interval onto the mean curve. Fitted artifacts now carry both and
+  `load_harmonic()` restores them, validating covariance shape and finiteness.
+- **A missing covariance is no longer silent.** Models built from published
+  harmonic constants genuinely have no covariance, so their bands collapse; the
+  model now reports `bands_available=False` (mirrored on `Prediction`) and
+  `predict()` raises a `UserWarning`, because a zero-width band is not a
+  calibrated interval. `TideModel.load_harmonic(..., residual_sigma_m=)` lets a
+  caller attach an externally supplied noise scale instead. The flag propagates
+  through the `residual` and `regimes` band wrappers.
+- **The `pytides` compatibility shims no longer leak into the host process**
+  (`cli.py`). `_load_pytides()` permanently patched `numpy.float`,
+  `builtins.reduce` and `collections.Iterable`, silently altering every other
+  library in the interpreter. The shims now live in the `_pytides_env()` context
+  manager and are rolled back on exit — scoped to the whole benchmark, since
+  `pytides` resolves those names lazily at call time rather than at import.
+- **Corrected the benchmark's claims.** The head-to-head against `pytides`
+  matched the protocol but *not* the harmonic basis (Marea selects constituents
+  via DCDM; `pytides` infers its own), so the RMSE gap cannot be attributed to
+  the exact solver. `bench` now prints a `basis:` caveat and a `scope:` line
+  making the single-record scope explicit, and `VALIDATION.md` no longer
+  claims an apples-to-apples solver-only result.
+- **The marine layer states its own limits instead of implying authority.**
+  `rip.risk` returns the `rate_term` / `range_term` / `wave_term` decomposition
+  plus `missing_inputs`, `confidence` and a `usable_for_safety` flag (always
+  `False`: waves and bathymetry dominate rip formation and are not modelled), and
+  accepts `sigma_m` so height uncertainty widens the rate term rather than being
+  ignored. The advisor threads the prediction's own uncertainty through, and
+  returns `None` rather than passing a false "exact" signal for band-less models.
+  `HarvestWindow` carries an explicit caution (exposure timing is not a
+  sanitation or biotoxin clearance) and the rulesets are labelled uncalibrated
+  screening defaults.
+
+### Changed
+- Package version → 3.3.0. This also corrects stale metadata that still declared
+  3.0.0 after the v3.1/v3.2 releases.
+
+### Notes
+- Public API contract stays `1.0`; all additions are backward compatible.
+- 367 tests pass (was 357).
+
+## [Earlier releases]
+
 ### Added — v3.0 "The living world model"
 - **Global coastal tide+surge field** (`marea/world.py`) — the kriged regional
   fields (v0.7) fuse with the federated peer network into one continuously-
