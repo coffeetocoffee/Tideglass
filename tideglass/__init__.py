@@ -14,6 +14,7 @@ from tideglass.fetch_emodnet import (
     fetch_emodnet_batch,
     fetch_emodnet_with_quality,
 )
+from tideglass import fetch_emodnet_poll, fetch_emodnet_auth
 
 __version__ = "3.3.0"
 from tideglass.marea.bench_global import compare, global_model_at, read_harmonic_grid
