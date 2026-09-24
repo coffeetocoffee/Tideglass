@@ -2670,7 +2670,8 @@ def cmd_join(args) -> int:
             if os.path.exists(state_path):
                 from tideglass.marea.nowcast import NowcastState
 
-                state = NowcastState.from_dict(json.load(open(state_path)))
+                with open(state_path, "r") as fh:
+                    state = NowcastState.from_dict(json.load(fh))
                 eng = NowcastEngine.from_state(model, state)
             else:
                 eng = _seat_engine(model, args.store, station)
