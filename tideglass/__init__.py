@@ -5,7 +5,7 @@ Marea Core (``tideglass.marea``) is the math engine; the marine layer
 surface adds export feeds, a stdlib HTTP API, and a terminal dashboard.
 """
 
-from tideglass import marea, marine
+from tideglass import fetch_emodnet_auth, fetch_emodnet_poll, marea, marine
 from tideglass.fetch_emodnet import (
     EMODNetError,
     EMODNetStationNotFoundError,
@@ -14,7 +14,6 @@ from tideglass.fetch_emodnet import (
     fetch_emodnet_batch,
     fetch_emodnet_with_quality,
 )
-from tideglass import fetch_emodnet_poll, fetch_emodnet_auth
 
 __version__ = "3.3.0"
 from tideglass.marea.bench_global import compare, global_model_at, read_harmonic_grid
@@ -147,6 +146,8 @@ __all__ = [
     "DecisionCurve",
     "DecisionLedger",
     "DischargeCoupling",
+    "EMODNetError",
+    "EMODNetStationNotFoundError",
     "FederatedRefit",
     "FederatedReport",
     "GaugeStore",
@@ -203,8 +204,10 @@ __all__ = [
     "decision_curve",
     "decluster",
     "dp_noisify",
+    "emodnet_stations",
     "evaluate_calibration",
     "federate",
+    "fetch_emodnet",
     "find",
     "fit_gpd",
     "flood_probability",
@@ -249,10 +252,6 @@ __all__ = [
     "to_xtide",
     "tpxo_model_at",
     "verify_public_api",
-    "EMODNetStationNotFoundError",
-    "EMODNetError",
-    "emodnet_stations",
-    "fetch_emodnet",
     "write_csv",
     "write_json",
     "write_netcdf",

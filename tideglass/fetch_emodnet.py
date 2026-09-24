@@ -75,7 +75,6 @@ def emodnet_stations(
         * ``frequency``: typical sampling frequency (hourly/daily/...)
         * ``provider``: national agency providing the data
     """
-    from email.utils import parsedate_to_datetime
 
     url = "https://emodnet-physics.ec.europa.eu/rest/datacollection/stations?"
 
@@ -468,7 +467,7 @@ def fetch_emodnet_with_quality(
             start="2024-02-01", min_quality="validated",
         )
     """
-    reader = csv.reader(StringIOWrapper(""))
+    csv.reader(StringIOWrapper(""))
 
     url = _emodnet_download_url(lon_min, lon_max, lat_min, lat_max, start, end, dataset)
 

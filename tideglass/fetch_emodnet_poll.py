@@ -28,13 +28,10 @@ Usage::
 
 from __future__ import annotations
 
-import os
 import time
-from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 
 from tideglass.fetch_emodnet import fetch_emodnet
-from tideglass.marea.model import TideModel
 
 
 class EmodnetPollError(RuntimeError):
